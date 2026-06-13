@@ -71,13 +71,24 @@ func RunMigrations() error {
 		}
 	}
 
+	initMu.Lock()
+	defer initMu.Unlock()
+	return runMigrationsLocked()
+}
+
+// runMigrationsLocked applies pending migrations. Caller must hold initMu.
+func runMigrationsLocked() error {
+	if dbInstance == nil {
+		return nil
+	}
+
 	// Ensure schema_migrations table exists (SQLite-compatible)
-	if err := execMigrationsDDL(); err != nil {
+	if err := dbInstance.execMigrationsDDL(); err != nil {
 		return fmt.Errorf("migration: create tracking table: %w", err)
 	}
 
 	// Load applied migration IDs
-	applied, err := loadAppliedMigrations()
+	applied, err := dbInstance.loadAppliedMigrationIDs()
 	if err != nil {
 		return fmt.Errorf("migration: load applied: %w", err)
 	}
@@ -98,11 +109,11 @@ func RunMigrations() error {
 		logger.GetLogger().Infof("[MIGRATION] Applying %s: %s", m.ID, m.Name)
 		start := time.Now()
 
-		if err := applyMigration(m); err != nil {
+		if err := dbInstance.execMigrationSQL(m.Up); err != nil {
 			return fmt.Errorf("migration %s (%s) failed: %w", m.ID, m.Name, err)
 		}
 
-		if err := recordMigration(m); err != nil {
+		if err := dbInstance.recordMigrationApplied(m.ID, m.Name); err != nil {
 			return fmt.Errorf("migration %s: record failed: %w", m.ID, err)
 		}
 

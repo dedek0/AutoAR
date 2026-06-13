@@ -53,8 +53,8 @@ func Init() error {
 		if os.Getenv("AUTOAR_SILENT") != "true" {
 			logger.GetLogger().Info("[INFO] Using PostgreSQL database")
 		}
-		// Run pending migrations after DB init
-		if err := RunMigrations(); err != nil {
+		// Run pending migrations after DB init (initMu already held — use locked variant)
+		if err := runMigrationsLocked(); err != nil {
 			logger.GetLogger().Warnf("[WARN] Migration warning: %v", err)
 		}
 		return nil
@@ -68,8 +68,8 @@ func Init() error {
 		if os.Getenv("AUTOAR_SILENT") != "true" {
 			logger.GetLogger().Info("[INFO] Using SQLite database")
 		}
-		// Run pending migrations after DB init
-		if err := RunMigrations(); err != nil {
+		// Run pending migrations after DB init (initMu already held — use locked variant)
+		if err := runMigrationsLocked(); err != nil {
 			logger.GetLogger().Warnf("[WARN] Migration warning: %v", err)
 		}
 		return nil
