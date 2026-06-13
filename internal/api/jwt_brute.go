@@ -4,11 +4,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
-	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"hash"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,12 +17,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// defaultJWTSecrets is the bundled common-secret wordlist used by the JWT
-// brute-force endpoint when the caller does not opt out. It is embedded so the
-// feature works without depending on the external Wordlists submodule.
-//
-//go:embed jwt_secrets.txt
-var defaultJWTSecrets string
+// defaultJWTSecrets is the built-in minimal wordlist for JWT brute-force.
+// It contains only the most common weak secrets. Operators can supply a
+// larger wordlist via AUTOAR_JWT_WORDLIST env var or the request body.
+var defaultJWTSecrets = strings.Join([]string{
+	"secret", "secretkey", "secret_key", "mysecret", "supersecret",
+	"password", "password123", "admin", "changeme", "default",
+	"123456", "letmein", "jwt", "jwtsecret", "token", "key",
+	"your-256-bit-secret", "your_secret_key", "shhhhh", "hmac",
+	"keyboardcat", "opensesame", "trustno1", "dragon", "monkey",
+}, "\n")
 
 // maxJWTCandidates caps how many secrets a single brute request will try, so a
 // huge pasted wordlist can't pin the CPU indefinitely.
@@ -110,7 +114,8 @@ func apiJWTBrute(c *gin.Context) {
 }
 
 // buildJWTSecretCandidates merges the bundled wordlist (unless disabled) with any
-// caller-supplied secrets, de-duplicating and always including the empty secret.
+// caller-supplied secrets and an optional wordlist file, de-duplicating and always
+// including the empty secret.
 func buildJWTSecretCandidates(req jwtBruteRequest) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 512)
@@ -130,6 +135,17 @@ func buildJWTSecretCandidates(req jwtBruteRequest) []string {
 				continue
 			}
 			add(t)
+		}
+
+		// Also load from AUTOAR_JWT_WORDLIST env var if set
+		if wordlistPath := strings.TrimSpace(os.Getenv("AUTOAR_JWT_WORDLIST")); wordlistPath != "" {
+			if data, err := os.ReadFile(wordlistPath); err == nil {
+				for _, line := range strings.Split(string(data), "\n") {
+					if t := strings.TrimSpace(line); t != "" && !strings.HasPrefix(t, "#") {
+						add(t)
+					}
+				}
+			}
 		}
 	}
 

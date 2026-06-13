@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,7 +51,7 @@ func main() {
 
 	if os.Getenv("RUN_SETUP") == "true" {
 		fmt.Println("[entrypoint] RUN_SETUP=true -> executing check-tools (Go)")
-		cmd := exec.Command("/usr/local/bin/autoar", "check-tools")
+		cmd := exec.CommandContext(context.Background(), "/usr/local/bin/autoar", "check-tools")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Env = os.Environ()
@@ -83,7 +84,7 @@ func main() {
 	switch mode {
 	case "api", "discord", "both":
 		fmt.Println("[entrypoint] Launching API Server...")
-		cmd = exec.Command("/usr/local/bin/autoar", "api")
+		cmd = exec.CommandContext(context.Background(), "/usr/local/bin/autoar", "api")
 	default:
 		fmt.Fprintf(os.Stderr, "[entrypoint] Error: Invalid AUTOAR_MODE '%s'\n", mode)
 		fmt.Fprintf(os.Stderr, "[entrypoint] Valid modes: api\n")

@@ -13,9 +13,18 @@ import (
 
 var (
 	ErrTimeout = fmt.Errorf("timeout")
-	// Global semaphore to limit concurrent heavy phases (e.g., 4 at a time)
+	// phaseSemaphore limits concurrent heavy phases.
+	// Default 4; call SetMaxConcurrentPhases or rely on config init.
 	phaseSemaphore = make(chan struct{}, 4)
 )
+
+// InitPhaseSemaphore reinitialises the phase semaphore with the given capacity.
+// Call this once during startup after config is loaded.
+func InitPhaseSemaphore(n int) {
+	if n > 0 {
+		phaseSemaphore = make(chan struct{}, n)
+	}
+}
 
 func SetMaxConcurrentPhases(n int) {
 	if n > 0 {

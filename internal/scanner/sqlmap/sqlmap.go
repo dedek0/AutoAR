@@ -2,6 +2,7 @@ package sqlmap
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"github.com/h0tak88r/AutoAR/internal/logger"
 	"os"
@@ -81,7 +82,7 @@ func RunSQLMap(domain string, threads int) (*Result, error) {
 
 	// Run sqlmap via native Go concurrency (replaces interlace limitation)
 	logger.GetLogger().Infof("[INFO] Running sqlmap natively with %d threads", threads)
-	structuredFindings, err := runSQLMapMultiThread(tempURLs, outFile, threads)
+	structuredFindings, err := runSQLMapMultiThread(context.Background(), tempURLs, outFile, threads)
 	if err != nil {
 		logger.GetLogger().Infof("[WARN] sqlmap scan failed: %v", err)
 	}
@@ -137,7 +138,7 @@ func cleanURLs(inFile, outFile string) error {
 	return scanner.Err()
 }
 
-func runSQLMapMultiThread(urlsFile, outFile string, workers int) ([]sqlmapFinding, error) {
+func runSQLMapMultiThread(ctx context.Context, urlsFile, outFile string, workers int) ([]sqlmapFinding, error) {
 	f, err := os.Open(urlsFile)
 	if err != nil {
 		return nil, err
@@ -173,7 +174,10 @@ func runSQLMapMultiThread(urlsFile, outFile string, workers int) ([]sqlmapFindin
 		go func() {
 			defer wg.Done()
 			for url := range jobs {
-				cmd := exec.Command("sqlmap", "-u", url, "--batch", "--random-agent", "--dbs")
+				if ctx.Err() != nil {
+					return
+				}
+				cmd := exec.CommandContext(ctx, "sqlmap", "-u", url, "--batch", "--random-agent", "--dbs")
 				output, _ := cmd.CombinedOutput()
 				outText := strings.ToLower(string(output))
 				outMutex.Lock()

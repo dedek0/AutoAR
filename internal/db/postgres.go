@@ -69,6 +69,7 @@ func (p *PostgresDB) Init() error {
 	config.MinConns = minConns
 	config.MaxConnLifetime = time.Hour
 	config.MaxConnIdleTime = time.Minute * 30
+	config.HealthCheckPeriod = time.Minute * 5
 
 	p.ctx = context.Background()
 	p.pool, err = pgxpool.NewWithConfig(p.ctx, config)
@@ -1419,32 +1420,40 @@ func (p *PostgresDB) UpdateScanProgress(scanID string, progress *ScanProgress) e
 }
 
 // AppendScanPhase atomically appends a phase name to completed_phases or failed_phases.
+// Uses SELECT ... FOR UPDATE to prevent lost updates under concurrent access.
 func (p *PostgresDB) AppendScanPhase(scanID, phaseName string, failed bool) error {
 	col := "completed_phases"
 	if failed {
 		col = "failed_phases"
 	}
-	// Read current value, append, write back
+
+	tx, err := p.pool.Begin(p.ctx)
+	if err != nil {
+		return fmt.Errorf("AppendScanPhase begin tx: %v", err)
+	}
+	defer tx.Rollback(p.ctx)
+
 	var raw []byte
-	err := p.pool.QueryRow(p.ctx, fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = $1`, col), scanID).Scan(&raw)
+	err = tx.QueryRow(p.ctx, fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = $1 FOR UPDATE`, col), scanID).Scan(&raw)
 	if err != nil {
 		return fmt.Errorf("AppendScanPhase read: %v", err)
 	}
+
 	var phases []string
 	unmarshalPhaseJSON(string(raw), &phases)
-	// Avoid duplicates
 	for _, ph := range phases {
 		if ph == phaseName {
-			return nil
+			return nil // already present, nothing to do
 		}
 	}
 	phases = append(phases, phaseName)
 	data := marshalPhaseJSON(phases)
-	_, err = p.pool.Exec(p.ctx, fmt.Sprintf(`UPDATE scans SET %s = $1, last_update = NOW(), updated_at = NOW() WHERE scan_id = $2`, col), data, scanID)
+
+	_, err = tx.Exec(p.ctx, fmt.Sprintf(`UPDATE scans SET %s = $1, last_update = NOW(), updated_at = NOW() WHERE scan_id = $2`, col), data, scanID)
 	if err != nil {
 		return fmt.Errorf("AppendScanPhase write: %v", err)
 	}
-	return nil
+	return tx.Commit(p.ctx)
 }
 
 // IsPhaseCompleted checks if a specific phase was already successfully completed for a scan.
@@ -1800,7 +1809,7 @@ func (p *PostgresDB) AddVulnerableDNSProvider(name, fingerprint string) error {
 func (p *PostgresDB) UpdateSubdomainTech(domain, subdomain, techs string) error {
 	domainID, err := p.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for tech update: %v", err)
 	}
 	
 	_, err = p.pool.Exec(p.ctx, `
@@ -1808,14 +1817,17 @@ func (p *PostgresDB) UpdateSubdomainTech(domain, subdomain, techs string) error 
 		SET techs = $1, updated_at = NOW() 
 		WHERE domain_id = $2 AND subdomain = $3
 	`, techs, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update subdomain techs for %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // UpdateSubdomainFull updates multiple recon fields for a subdomain at once
 func (p *PostgresDB) UpdateSubdomainFull(domain, subdomain string, techs, title string, statusCode int, isLive bool) error {
 	domainID, err := p.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for full update: %v", err)
 	}
 	
 	_, err = p.pool.Exec(p.ctx, `
@@ -1827,14 +1839,17 @@ func (p *PostgresDB) UpdateSubdomainFull(domain, subdomain string, techs, title 
 		    updated_at = NOW() 
 		WHERE domain_id = $4 AND subdomain = $5
 	`, techs, statusCode, isLive, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to full-update subdomain %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // UpdateSubdomainCNAME updates the mapped CNAME record for a subdomain
 func (p *PostgresDB) UpdateSubdomainCNAME(domain, subdomain, cnames string) error {
 	domainID, err := p.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for CNAME update: %v", err)
 	}
 	
 	_, err = p.pool.Exec(p.ctx, `
@@ -1842,7 +1857,10 @@ func (p *PostgresDB) UpdateSubdomainCNAME(domain, subdomain, cnames string) erro
 		SET cnames = $1, updated_at = NOW() 
 		WHERE domain_id = $2 AND subdomain = $3
 	`, cnames, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update CNAME for %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // GetSetting retrieves a setting value by key. Returns "" if not found.
@@ -1850,11 +1868,10 @@ func (p *PostgresDB) GetSetting(key string) (string, error) {
 	var value string
 	err := p.pool.QueryRow(p.ctx, `SELECT value FROM settings WHERE key = $1 LIMIT 1`, key).Scan(&value)
 	if err != nil {
-		if err.Error() == "no rows in result set" || err.Error() == "context canceled" {
+		if err == pgx.ErrNoRows {
 			return "", nil
 		}
-		// pgx.ErrNoRows check by string (avoids import cycle)
-		return "", nil
+		return "", err
 	}
 	return value, nil
 }
@@ -1897,7 +1914,10 @@ func (p *PostgresDB) UpdateScanStats(scanID string, filesUploaded, errorCount in
 			updated_at = NOW()
 		WHERE scan_id = $3
 	`, filesUploaded, errorCount, scanID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update scan stats for %s: %v", scanID, err)
+	}
+	return nil
 }
 
 // Close closes the database connection pool
@@ -1905,5 +1925,53 @@ func (p *PostgresDB) Close() {
 	if p.pool != nil {
 		p.pool.Close()
 	}
+}
+
+// --- Migration support ---
+
+func (p *PostgresDB) execMigrationsDDL() error {
+	_, err := p.pool.Exec(p.ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TIMESTAMP NOT NULL
+		);`)
+	return err
+}
+
+func (p *PostgresDB) execMigrationSQL(sql string) error {
+	tx, err := p.pool.Begin(p.ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(p.ctx)
+	if _, err := tx.Exec(p.ctx, sql); err != nil {
+		return err
+	}
+	return tx.Commit(p.ctx)
+}
+
+func (p *PostgresDB) loadAppliedMigrationIDs() (map[string]bool, error) {
+	applied := make(map[string]bool)
+	rows, err := p.pool.Query(p.ctx, `SELECT id FROM schema_migrations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		applied[id] = true
+	}
+	return applied, rows.Err()
+}
+
+func (p *PostgresDB) recordMigrationApplied(id, name string) error {
+	_, err := p.pool.Exec(p.ctx,
+		`INSERT INTO schema_migrations (id, name, applied_at) VALUES ($1, $2, NOW())`,
+		id, name)
+	return err
 }
 

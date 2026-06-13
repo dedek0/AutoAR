@@ -49,10 +49,10 @@ func (s *SQLiteDB) Init() error {
 	// Configure connection pool settings for SQLite
 	// With WAL mode enabled, we can support multiple readers and one writer
 	// modernc.org/sqlite supports concurrency well in WAL mode
-	db.SetMaxOpenConns(25)              // Allow multiple concurrent connections
-	db.SetMaxIdleConns(25)              // Keep up to 25 idle connections
-	db.SetConnMaxLifetime(time.Hour)   // Close connections after 1 hour
-	db.SetConnMaxIdleTime(time.Minute * 30) // Close idle connections after 30 minutes
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(time.Hour)
+	db.SetConnMaxIdleTime(time.Minute * 10)
 
 	// Test connection
 	if err := db.Ping(); err != nil {
@@ -1343,16 +1343,25 @@ func (s *SQLiteDB) UpdateScanProgress(scanID string, progress *ScanProgress) err
 }
 
 // AppendScanPhase atomically appends a phase name to completed_phases or failed_phases.
+// Uses a transaction to prevent lost updates under concurrent access.
 func (s *SQLiteDB) AppendScanPhase(scanID, phaseName string, failed bool) error {
 	col := "completed_phases"
 	if failed {
 		col = "failed_phases"
 	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("AppendScanPhase begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
 	var raw string
-	err := s.db.QueryRow(fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = ?`, col), scanID).Scan(&raw)
+	err = tx.QueryRow(fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = ?`, col), scanID).Scan(&raw)
 	if err != nil {
 		return fmt.Errorf("AppendScanPhase read: %v", err)
 	}
+
 	var phases []string
 	if raw != "" {
 		unmarshalPhaseJSON(raw, &phases)
@@ -1364,11 +1373,12 @@ func (s *SQLiteDB) AppendScanPhase(scanID, phaseName string, failed bool) error 
 	}
 	phases = append(phases, phaseName)
 	data := marshalPhaseJSON(phases)
-	_, err = s.db.Exec(fmt.Sprintf(`UPDATE scans SET %s = ?, last_update = ?, updated_at = datetime('now') WHERE scan_id = ?`, col), data, time.Now(), scanID)
+
+	_, err = tx.Exec(fmt.Sprintf(`UPDATE scans SET %s = ?, last_update = ?, updated_at = datetime('now') WHERE scan_id = ?`, col), data, time.Now(), scanID)
 	if err != nil {
 		return fmt.Errorf("AppendScanPhase write: %v", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // IsPhaseCompleted checks if a specific phase was already successfully completed for a scan.
@@ -1748,7 +1758,7 @@ func (s *SQLiteDB) AddVulnerableDNSProvider(name, fingerprint string) error {
 func (s *SQLiteDB) UpdateSubdomainTech(domain, subdomain, techs string) error {
 	domainID, err := s.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for tech update: %v", err)
 	}
 	
 	_, err = s.db.Exec(`
@@ -1756,14 +1766,17 @@ func (s *SQLiteDB) UpdateSubdomainTech(domain, subdomain, techs string) error {
 		SET techs = ?, updated_at = datetime('now')
 		WHERE domain_id = ? AND subdomain = ?
 	`, techs, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update subdomain techs for %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // UpdateSubdomainFull updates multiple recon fields for a subdomain at once
 func (s *SQLiteDB) UpdateSubdomainFull(domain, subdomain string, techs, title string, statusCode int, isLive bool) error {
 	domainID, err := s.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for full update: %v", err)
 	}
 	
 	isLiveInt := 0
@@ -1778,14 +1791,17 @@ func (s *SQLiteDB) UpdateSubdomainFull(domain, subdomain string, techs, title st
 		    updated_at = datetime('now')
 		WHERE domain_id = ? AND subdomain = ?
 	`, techs, statusCode, statusCode, statusCode, statusCode, isLiveInt, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to full-update subdomain %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // UpdateSubdomainCNAME updates the mapped CNAME record for a subdomain
 func (s *SQLiteDB) UpdateSubdomainCNAME(domain, subdomain, cnames string) error {
 	domainID, err := s.InsertOrGetDomain(domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get domain ID for CNAME update: %v", err)
 	}
 	
 	_, err = s.db.Exec(`
@@ -1793,7 +1809,10 @@ func (s *SQLiteDB) UpdateSubdomainCNAME(domain, subdomain, cnames string) error 
 		SET cnames = ?, updated_at = datetime('now')
 		WHERE domain_id = ? AND subdomain = ?
 	`, cnames, domainID, subdomain)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update CNAME for %s: %v", subdomain, err)
+	}
+	return nil
 }
 
 // GetSetting retrieves a setting value by key. Returns "" if not found.
@@ -1847,7 +1866,10 @@ func (s *SQLiteDB) UpdateScanStats(scanID string, filesUploaded, errorCount int)
 			updated_at = datetime('now')
 		WHERE scan_id = ?
 	`, filesUploaded, errorCount, scanID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update scan stats for %s: %v", scanID, err)
+	}
+	return nil
 }
 
 // Close closes the database connection
@@ -1855,4 +1877,52 @@ func (s *SQLiteDB) Close() {
 	if s.db != nil {
 		s.db.Close()
 	}
+}
+
+// --- Migration support ---
+
+func (s *SQLiteDB) execMigrationsDDL() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);`)
+	return err
+}
+
+func (s *SQLiteDB) execMigrationSQL(sql string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(sql); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteDB) loadAppliedMigrationIDs() (map[string]bool, error) {
+	applied := make(map[string]bool)
+	rows, err := s.db.Query(`SELECT id FROM schema_migrations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		applied[id] = true
+	}
+	return applied, rows.Err()
+}
+
+func (s *SQLiteDB) recordMigrationApplied(id, name string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)`,
+		id, name, time.Now().Format(time.RFC3339))
+	return err
 }

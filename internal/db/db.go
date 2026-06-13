@@ -53,6 +53,10 @@ func Init() error {
 		if os.Getenv("AUTOAR_SILENT") != "true" {
 			logger.GetLogger().Info("[INFO] Using PostgreSQL database")
 		}
+		// Run pending migrations after DB init
+		if err := RunMigrations(); err != nil {
+			logger.GetLogger().Warnf("[WARN] Migration warning: %v", err)
+		}
 		return nil
 
 	case "sqlite", "sqlite3":
@@ -63,6 +67,10 @@ func Init() error {
 		dbInstance = sqliteDB
 		if os.Getenv("AUTOAR_SILENT") != "true" {
 			logger.GetLogger().Info("[INFO] Using SQLite database")
+		}
+		// Run pending migrations after DB init
+		if err := RunMigrations(); err != nil {
+			logger.GetLogger().Warnf("[WARN] Migration warning: %v", err)
 		}
 		return nil
 

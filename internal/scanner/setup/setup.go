@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,7 +127,7 @@ func checkAndInstallSystemPackages(osType string) error {
 		
 		packageChecker = func(pkg string) bool {
 			// Check if package is installed using dpkg
-			cmd := exec.Command("dpkg", "-l", pkg)
+			cmd := exec.CommandContext(context.Background(), "dpkg", "-l", pkg)
 			cmd.Stdout = nil
 			cmd.Stderr = nil
 			return cmd.Run() == nil
@@ -148,7 +149,7 @@ func checkAndInstallSystemPackages(osType string) error {
 
 		// Update package list
 		fmt.Println("   Updating package list...")
-		updateCmd := exec.Command("sudo", "apt-get", "update")
+		updateCmd := exec.CommandContext(context.Background(), "sudo", "apt-get", "update")
 		updateCmd.Stdout = os.Stdout
 		updateCmd.Stderr = os.Stderr
 		if err := updateCmd.Run(); err != nil {
@@ -157,7 +158,7 @@ func checkAndInstallSystemPackages(osType string) error {
 
 		// Install missing packages
 		fmt.Printf("   Installing missing packages: %s\n", strings.Join(packagesToInstall, ", "))
-		installCmd := exec.Command("sudo", append([]string{"apt-get", "install", "-y", "--no-install-recommends"}, packagesToInstall...)...)
+		installCmd := exec.CommandContext(context.Background(), "sudo", append([]string{"apt-get", "install", "-y", "--no-install-recommends"}, packagesToInstall...)...)
 		installCmd.Stdout = os.Stdout
 		installCmd.Stderr = os.Stderr
 		if err := installCmd.Run(); err != nil {
@@ -177,7 +178,7 @@ func checkAndInstallSystemPackages(osType string) error {
 		
 		packageChecker = func(pkg string) bool {
 			// Check if package is installed using rpm
-			cmd := exec.Command("rpm", "-q", pkg)
+			cmd := exec.CommandContext(context.Background(), "rpm", "-q", pkg)
 			cmd.Stdout = nil
 			cmd.Stderr = nil
 			return cmd.Run() == nil
@@ -198,7 +199,7 @@ func checkAndInstallSystemPackages(osType string) error {
 		}
 
 		fmt.Printf("   Installing missing packages: %s\n", strings.Join(packagesToInstall, ", "))
-		installCmd := exec.Command("sudo", append([]string{"yum", "install", "-y"}, packagesToInstall...)...)
+		installCmd := exec.CommandContext(context.Background(), "sudo", append([]string{"yum", "install", "-y"}, packagesToInstall...)...)
 		installCmd.Stdout = os.Stdout
 		installCmd.Stderr = os.Stderr
 		if err := installCmd.Run(); err != nil {
@@ -225,7 +226,7 @@ func checkAndInstallSystemPackages(osType string) error {
 		fmt.Println("        (then log out and back in)")
 	} else {
 		// Check if Docker daemon is running
-		cmd := exec.Command("docker", "info")
+		cmd := exec.CommandContext(context.Background(), "docker", "info")
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 		if err := cmd.Run(); err != nil {
@@ -265,7 +266,7 @@ func checkAndInstallGoTools() error {
 	if _, err := exec.LookPath("nuclei"); err != nil {
 		fmt.Println("   [MISSING] nuclei")
 		fmt.Println("   Installing nuclei...")
-		nucleiCmd := exec.Command("go", "install", "-v", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest")
+		nucleiCmd := exec.CommandContext(context.Background(), "go", "install", "-v", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest")
 		nucleiCmd.Env = append(os.Environ(), "GOBIN="+goPath)
 		nucleiCmd.Stdout = os.Stdout
 		nucleiCmd.Stderr = os.Stderr
@@ -287,14 +288,14 @@ func checkAndInstallGoTools() error {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		cloneCmd := exec.Command("git", "clone", "--depth", "1", "https://github.com/trufflesecurity/trufflehog.git", tmpDir)
+		cloneCmd := exec.CommandContext(context.Background(), "git", "clone", "--depth", "1", "https://github.com/trufflesecurity/trufflehog.git", tmpDir)
 		cloneCmd.Stdout = os.Stdout
 		cloneCmd.Stderr = os.Stderr
 		if err := cloneCmd.Run(); err != nil {
 			return fmt.Errorf("failed to clone trufflehog: %w", err)
 		}
 
-		buildCmd := exec.Command("go", "build", "-o", filepath.Join(goPath, "trufflehog"), ".")
+		buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", filepath.Join(goPath, "trufflehog"), ".")
 		buildCmd.Dir = tmpDir
 		buildCmd.Env = append(os.Environ(), "GOBIN="+goPath)
 		buildCmd.Stdout = os.Stdout
@@ -345,7 +346,7 @@ func checkAndCloneNucleiTemplates(root string) error {
 			fmt.Println("   [OK] Nuclei public templates already cloned")
 			// Try to update them
 			fmt.Println("   Updating Nuclei public templates...")
-			updateCmd := exec.Command("git", "pull")
+			updateCmd := exec.CommandContext(context.Background(), "git", "pull")
 			updateCmd.Dir = nucleiTemplatesDir
 			updateCmd.Stdout = os.Stdout
 			updateCmd.Stderr = os.Stderr
@@ -361,7 +362,7 @@ func checkAndCloneNucleiTemplates(root string) error {
 	// Clone the repository
 	fmt.Println("   [MISSING] Nuclei public templates")
 	fmt.Println("   Cloning Nuclei public templates from GitHub...")
-	cloneCmd := exec.Command("git", "clone", "--depth", "1", "https://github.com/projectdiscovery/nuclei-templates.git", nucleiTemplatesDir)
+	cloneCmd := exec.CommandContext(context.Background(), "git", "clone", "--depth", "1", "https://github.com/projectdiscovery/nuclei-templates.git", nucleiTemplatesDir)
 	cloneCmd.Stdout = os.Stdout
 	cloneCmd.Stderr = os.Stderr
 	if err := cloneCmd.Run(); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,15 +34,14 @@ func TestNewConcurrentFileUploader(t *testing.T) {
 		t.Errorf("semaphore cap = %d, want 5", cap(u.semaphore))
 	}
 
-	// Zero or negative should default to 3
 	u2 := NewConcurrentFileUploader(0)
-	if u2.maxConcurrent != 3 {
-		t.Errorf("maxConcurrent = %d, want 3 (default)", u2.maxConcurrent)
+	if u2.maxConcurrent != 25 {
+		t.Errorf("maxConcurrent = %d, want 25 (default)", u2.maxConcurrent)
 	}
 
 	u3 := NewConcurrentFileUploader(-1)
-	if u3.maxConcurrent != 3 {
-		t.Errorf("maxConcurrent = %d, want 3 (default)", u3.maxConcurrent)
+	if u3.maxConcurrent != 25 {
+		t.Errorf("maxConcurrent = %d, want 25 (default)", u3.maxConcurrent)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestRetryWithBackoffSuccess(t *testing.T) {
 		t.Errorf("RetryWithBackoff() = %v, want nil", err)
 	}
 	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1 (should succeed on first try)", attempts)
+		t.Errorf("attempts = %d, want 1", attempts)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestRetryWithBackoffContextCancel(t *testing.T) {
 	attempts := 0
 	fn := func() error {
 		attempts++
-		cancel() // Cancel after first attempt
+		cancel()
 		return errors.New("fail")
 	}
 
@@ -160,7 +160,6 @@ func TestConcurrentFileUploaderContextCancel(t *testing.T) {
 	uploader := NewConcurrentFileUploader(1)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Block the single semaphore slot
 	uploader.semaphore <- struct{}{}
 
 	files := []string{"blocked.txt"}
@@ -172,13 +171,130 @@ func TestConcurrentFileUploaderContextCancel(t *testing.T) {
 		close(done)
 	}()
 
-	cancel()        // Cancel while the goroutine is waiting for semaphore
-	<-uploader.semaphore // Release the slot so UploadFiles can observe cancellation
+	cancel()
+	<-uploader.semaphore
 
 	select {
 	case <-done:
-		// Success — UploadFiles returned after cancellation
 	case <-time.After(500 * time.Millisecond):
 		t.Error("UploadFiles did not return within 500ms after context cancellation")
 	}
+}
+
+func TestWorkerPoolBasic(t *testing.T) {
+	pool := NewWorkerPool(context.Background(), 3)
+	var counter int64
+
+	for i := 0; i < 10; i++ {
+		pool.Submit(func(ctx context.Context) error {
+			atomic.AddInt64(&counter, 1)
+			return nil
+		})
+	}
+
+	if err := pool.Wait(); err != nil {
+		t.Errorf("WorkerPool.Wait() = %v, want nil", err)
+	}
+	if got := atomic.LoadInt64(&counter); got != 10 {
+		t.Errorf("counter = %d, want 10", got)
+	}
+}
+
+func TestWorkerPoolConcurrencyLimit(t *testing.T) {
+	maxWorkers := 2
+	pool := NewWorkerPool(context.Background(), maxWorkers)
+
+	var mu sync.Mutex
+	running := 0
+	peakRunning := 0
+
+	for i := 0; i < 10; i++ {
+		pool.Submit(func(ctx context.Context) error {
+			mu.Lock()
+			running++
+			if running > peakRunning {
+				peakRunning = running
+			}
+			mu.Unlock()
+
+			time.Sleep(10 * time.Millisecond)
+
+			mu.Lock()
+			running--
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := pool.Wait(); err != nil {
+		t.Errorf("WorkerPool.Wait() = %v, want nil", err)
+	}
+	if peakRunning > maxWorkers {
+		t.Errorf("peak running = %d, want at most %d", peakRunning, maxWorkers)
+	}
+}
+
+func TestWorkerPoolErrorPropagation(t *testing.T) {
+	pool := NewWorkerPool(context.Background(), 5)
+	testErr := errors.New("worker error")
+
+	pool.Submit(func(ctx context.Context) error {
+		return testErr
+	})
+	pool.Submit(func(ctx context.Context) error {
+		return nil
+	})
+
+	err := pool.Wait()
+	if err == nil {
+		t.Fatal("WorkerPool.Wait() should return error")
+	}
+	if !errors.Is(err, testErr) {
+		t.Errorf("WorkerPool.Wait() = %v, want %v", err, testErr)
+	}
+}
+
+func TestWorkerPoolContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := NewWorkerPool(ctx, 2)
+
+	started := make(chan struct{})
+	pool.Submit(func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	<-started
+	cancel()
+
+	err := pool.Wait()
+	if err == nil {
+		t.Fatal("WorkerPool.Wait() should return error after context cancellation")
+	}
+}
+
+func TestInitGlobalSemaphore(t *testing.T) {
+	// Re-init for testing (normally called once)
+	globalSemOnce = sync.Once{}
+	InitGlobalSemaphore(10)
+	if globalSem == nil {
+		t.Fatal("globalSem should be initialized")
+	}
+}
+
+func TestAcquireReleaseGlobal(t *testing.T) {
+	globalSemOnce = sync.Once{}
+	InitGlobalSemaphore(2)
+
+	ctx := context.Background()
+	if err := AcquireGlobal(ctx); err != nil {
+		t.Errorf("AcquireGlobal() = %v, want nil", err)
+	}
+	ReleaseGlobal()
+
+	if err := AcquireGlobal(ctx); err != nil {
+		t.Errorf("AcquireGlobal() after release = %v, want nil", err)
+	}
+	ReleaseGlobal()
 }

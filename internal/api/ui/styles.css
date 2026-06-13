@@ -3797,3 +3797,147 @@ select.input {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Mobile Responsiveness — Fix horizontal overflow, fixed widths, and layouts
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Prevent any element from causing horizontal scroll on mobile */
+.shell { overflow-x: hidden; }
+.content { overflow-x: hidden; max-width: 100%; }
+
+/* Settings control: fixed 450px → responsive */
+.settings-control {
+  width: 100%;
+  max-width: 450px;
+  flex-wrap: wrap;
+}
+
+/* Launcher and scans toolbar fields: flex-basis 260px → min-width safe */
+.launcher-field-target,
+.scans-toolbar-search {
+  flex: 1 1 0;
+  min-width: 140px;
+}
+
+.launcher-field-type,
+.launcher-field-mode {
+  flex: 0 1 180px;
+  min-width: 120px;
+}
+
+/* Settings timeout grid: 2-col → 1-col on narrow */
+@media (max-width: 768px) {
+  .settings-timeout-grid {
+    grid-template-columns: 1fr;
+    padding: 16px;
+  }
+
+  .settings-control {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .settings-control > * {
+    width: 100%;
+  }
+}
+
+/* ── Tables: horizontal scroll on small screens ─────────────────────────── */
+.content table,
+.result-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Forms and inputs: prevent overflow ─────────────────────────────────── */
+.content input[type="text"],
+.content input[type="password"],
+.content input[type="email"],
+.content input[type="number"],
+.content select,
+.content textarea {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* ── Modals: constrain to viewport ──────────────────────────────────────── */
+.modal,
+.modal-overlay,
+.modal-content,
+.modal-body,
+.modal-dialog {
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+/* ── Scan detail and ASM panels ─────────────────────────────────────────── */
+.scan-asm-layout,
+.scan-detail-header,
+.scan-detail-content {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* ── Cards and stat grids: responsive columns ───────────────────────────── */
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .findings-grid { grid-template-columns: 1fr; }
+  .settings-timeout-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 600px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .nav-grid { grid-template-columns: 1fr; }
+  .r2-browser { grid-template-columns: 1fr; }
+
+  /* Launcher fields stack vertically */
+  .launcher-field {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .launcher-field-type,
+  .launcher-field-mode,
+  .launcher-field-target,
+  .launcher-field-action {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  /* Scan toolbar wraps */
+  .scans-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .scans-toolbar-search {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  /* Reduce padding on content */
+  .content { padding: 12px; }
+}
+
+/* ── Auth gate: responsive on tiny screens ──────────────────────────────── */
+@media (max-width: 400px) {
+  .auth-card {
+    padding: 20px 16px;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 8px;
+  }
+}
+
+/* ── Keyhacks table: prevent overflow ───────────────────────────────────── */
+.keyhack-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Program list / findings rows ───────────────────────────────────────── */
+.programs-list,
+.findings-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}

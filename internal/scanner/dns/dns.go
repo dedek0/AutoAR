@@ -635,7 +635,7 @@ func runDNSReaper(domainDir, findingsDir, subsFile string) error {
 		logger.GetLogger().Infof("[WARN] docker not found, skipping DNSReaper")
 		return nil
 	}
-	if err := exec.Command("docker", "ps").Run(); err != nil {
+	if err := exec.CommandContext(context.Background(), "docker", "ps").Run(); err != nil {
 		logger.GetLogger().Infof("[WARN] cannot run docker ps (permissions?); skipping DNSReaper: %v", err)
 		return nil
 	}
@@ -647,7 +647,7 @@ func runDNSReaper(domainDir, findingsDir, subsFile string) error {
 
 	out := filepath.Join(findingsDir, "dnsreaper-results.txt")
 	logger.GetLogger().Infof("[INFO] Running DNSReaper against %s", input)
-	cmd := exec.Command("docker", "run", "--rm", "-v", fmt.Sprintf("%s:/etc/dnsreaper", utils.GetRootDir()+":/etc/dnsreaper"))
+	cmd := exec.CommandContext(context.Background(), "docker", "run", "--rm", "-v", fmt.Sprintf("%s:/etc/dnsreaper", utils.GetRootDir()+":/etc/dnsreaper"))
 	// Note: for simplicity we assume working directory is rootDir; the original script used `$(pwd)`
 	cmd.Args = []string{"docker", "run", "--rm", "-v", fmt.Sprintf("%s:/etc/dnsreaper", utils.GetRootDir()), "punksecurity/dnsreaper", "file", "--filename", "/etc/dnsreaper/" + strings.TrimPrefix(input, utils.GetRootDir()+"/")}
 	f, err := os.Create(out)

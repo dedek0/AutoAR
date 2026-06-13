@@ -7,6 +7,7 @@ package gospider
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/h0tak88r/AutoAR/internal/logger"
 	"os/exec"
@@ -16,13 +17,14 @@ import (
 
 // Options controls the spider run.
 type Options struct {
-	Sites      []string // URLs to spider
-	Depth      int      // recursion depth (default 2)
-	Concurrent int      // concurrent requests per site (default 5)
-	Threads    int      // parallel sites (default 5)
-	Timeout    int      // per-request timeout seconds (default 10)
-	Robots     bool     // follow robots.txt hints (default true)
-	JS         bool     // linkfinder in JS files (default true)
+	Ctx      context.Context // parent context for cancellation
+	Sites    []string        // URLs to spider
+	Depth    int             // recursion depth (default 2)
+	Concurrent int           // concurrent requests per site (default 5)
+	Threads  int             // parallel sites (default 5)
+	Timeout  int             // per-request timeout seconds (default 10)
+	Robots   bool            // follow robots.txt hints (default true)
+	JS       bool            // linkfinder in JS files (default true)
 }
 
 // Result holds discovered URLs.
@@ -38,9 +40,15 @@ var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // Run spiders the given sites and returns all discovered URLs.
 // If the gospider binary is not available it logs a warning and returns an empty result.
+// Context cancellation kills child processes immediately.
 func Run(opts Options) (*Result, error) {
 	if len(opts.Sites) == 0 {
 		return &Result{}, nil
+	}
+
+	ctx := opts.Ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	// Defaults
@@ -75,6 +83,9 @@ func Run(opts Options) (*Result, error) {
 	}
 
 	for _, site := range opts.Sites {
+		if ctx.Err() != nil {
+			break
+		}
 		if !strings.HasPrefix(site, "http") {
 			site = "https://" + site
 		}
@@ -94,12 +105,15 @@ func Run(opts Options) (*Result, error) {
 			args = append(args, "--js")
 		}
 
-		cmd := exec.Command(binaryPath, args...)
+		cmd := exec.CommandContext(ctx, binaryPath, args...)
 		var out bytes.Buffer
 		cmd.Stdout = &out
 
 		logger.GetLogger().Infof("[gospider] Crawling %s (depth=%d concurrent=%d)", site, opts.Depth, opts.Concurrent)
 		if runErr := cmd.Run(); runErr != nil {
+			if ctx.Err() != nil {
+				break // context cancelled — stop immediately
+			}
 			// exit 1 is normal when no URLs found
 			logger.GetLogger().Infof("[gospider] %s finished with: %v", site, runErr)
 		}
@@ -111,7 +125,6 @@ func Run(opts Options) (*Result, error) {
 				add(line)
 				continue
 			}
-			// Non-quiet fallback: extract URLs from formatted lines
 			for _, match := range urlPattern.FindAllString(line, -1) {
 				add(match)
 			}

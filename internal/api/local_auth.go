@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/h0tak88r/AutoAR/internal/config"
 	"github.com/h0tak88r/AutoAR/internal/db"
 )
 
@@ -32,12 +33,12 @@ var (
 )
 
 // localAuthJWTSecret returns the HS256 signing secret.
-// Priority: AUTOAR_JWT_SECRET env → a persisted random secret (settings KV, so
-// tokens survive restarts) → a freshly generated random secret.
-// The secret is NEVER derived from the password: deriving it from the password
-// made captured tokens offline-crackable to recover the cleartext password.
+// Priority: AUTOAR_JWT_SECRET env (via Viper) → DB-persisted random secret →
+// freshly generated random secret logged as a warning.
+// The secret is NEVER derived from the password.
 func localAuthJWTSecret() []byte {
-	if s := strings.TrimSpace(os.Getenv("AUTOAR_JWT_SECRET")); s != "" {
+	// Config precedence: Env > YAML > Default (Viper handles this)
+	if s := strings.TrimSpace(config.GetConfigValue("AUTOAR_JWT_SECRET", "")); s != "" {
 		return []byte(s)
 	}
 	localAuthSecretOnce.Do(func() {
@@ -49,6 +50,9 @@ func localAuthJWTSecret() []byte {
 				return
 			}
 		}
+		// No secret configured and none persisted — generate a strong random key.
+		// Tokens will be invalidated on next restart unless the operator sets
+		// AUTOAR_JWT_SECRET.
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
 			panic("failed to generate local auth secret: " + err.Error())
@@ -56,6 +60,8 @@ func localAuthJWTSecret() []byte {
 		hexKey := hex.EncodeToString(key)
 		_ = db.SetSetting(jwtSecretSettingKey, hexKey) // best-effort persist
 		localAuthSecret = []byte(hexKey)
+		fmt.Fprintf(os.Stderr, "[SECURITY] WARNING: No AUTOAR_JWT_SECRET configured. Generated ephemeral JWT signing key. "+
+			"Set AUTOAR_JWT_SECRET in your environment for token persistence across restarts.\n")
 	})
 	return localAuthSecret
 }

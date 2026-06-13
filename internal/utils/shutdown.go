@@ -12,7 +12,8 @@ import (
 )
 
 // ShutdownManager handles the lifecycle of the application during a termination event.
-// It tracks active scans and ensures they complete (or timeout) before the process exits.
+// It tracks active scans, manages child process cleanup, and ensures they complete
+// (or timeout) before the process exits.
 type ShutdownManager struct {
 	mu              sync.RWMutex
 	shutdownFlag    bool
@@ -20,6 +21,8 @@ type ShutdownManager struct {
 	shutdownTimeout time.Duration
 	logger          *logrus.Logger
 	onShutdown      []func() error
+	childPIDs       map[int32]bool
+	childMu         sync.Mutex
 }
 
 var (
@@ -38,6 +41,7 @@ func InitShutdownManager(timeout time.Duration, logger *logrus.Logger) *Shutdown
 			shutdownTimeout: timeout,
 			logger:          logger,
 			onShutdown:      make([]func() error, 0),
+			childPIDs:       make(map[int32]bool),
 		}
 	})
 	return GlobalShutdownManager
@@ -49,6 +53,63 @@ func GetShutdownManager() *ShutdownManager {
 		return InitShutdownManager(5*time.Minute, GetLogger())
 	}
 	return GlobalShutdownManager
+}
+
+// RegisterChildProcess registers a child process PID for cleanup on shutdown.
+func (sm *ShutdownManager) RegisterChildProcess(pid int32) {
+	sm.childMu.Lock()
+	sm.childPIDs[pid] = true
+	sm.childMu.Unlock()
+}
+
+// UnregisterChildProcess removes a child process PID from the tracking list.
+func (sm *ShutdownManager) UnregisterChildProcess(pid int32) {
+	sm.childMu.Lock()
+	delete(sm.childPIDs, pid)
+	sm.childMu.Unlock()
+}
+
+// KillChildProcesses sends SIGTERM to all tracked child processes.
+// After a 5-second grace period, remaining processes receive SIGKILL.
+func (sm *ShutdownManager) KillChildProcesses() {
+	sm.childMu.Lock()
+	pids := make([]int32, 0, len(sm.childPIDs))
+	for pid := range sm.childPIDs {
+		pids = append(pids, pid)
+	}
+	sm.childPIDs = make(map[int32]bool)
+	sm.childMu.Unlock()
+
+	if len(pids) == 0 {
+		return
+	}
+
+	if sm.logger != nil {
+		sm.logger.Infof("Sending SIGTERM to %d child process(es)", len(pids))
+	}
+
+	for _, pid := range pids {
+		if proc, err := os.FindProcess(int(pid)); err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+		}
+	}
+
+	// Grace period then SIGKILL
+	time.Sleep(5 * time.Second)
+
+	sm.childMu.Lock()
+	remaining := make([]int32, 0)
+	for _, pid := range pids {
+		if proc, err := os.FindProcess(int(pid)); err == nil {
+			remaining = append(remaining, pid)
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	}
+	sm.childMu.Unlock()
+
+	if len(remaining) > 0 && sm.logger != nil {
+		sm.logger.Warnf("Force-killed %d zombie child process(es)", len(remaining))
+	}
 }
 
 // RegisterShutdownHook registers a function to be executed during the shutdown sequence.
@@ -134,6 +195,9 @@ func (sm *ShutdownManager) Shutdown(ctx context.Context) error {
 	}
 
 cleanup:
+	// Kill any remaining child processes (zombie prevention)
+	sm.KillChildProcesses()
+
 	// Execute shutdown hooks
 	sm.mu.RLock()
 	hooks := sm.onShutdown

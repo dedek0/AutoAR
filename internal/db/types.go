@@ -145,6 +145,12 @@ type DB interface {
 	// UpdateScanStats updates the counts for findings/files and errors.
 	UpdateScanStats(scanID string, filesUploaded, errorCount int) error
 
+	// Migrations
+	execMigrationsDDL() error
+	execMigrationSQL(sql string) error
+	loadAppliedMigrationIDs() (map[string]bool, error)
+	recordMigrationApplied(id, name string) error
+
 	// Close closes the database connection
 	Close()
 }
