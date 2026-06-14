@@ -8,36 +8,40 @@ import (
 // GetSetting retrieves a setting value by key.
 // Returns ("", nil) if the key doesn't exist.
 func GetSetting(key string) (string, error) {
-	if err := Init(); err != nil {
+	database, err := getInitializedDB()
+	if err != nil {
 		return "", err
 	}
-	return dbInstance.GetSetting(key)
+	return database.GetSetting(key)
 }
 
 // SetSetting stores a setting key/value, creating or overwriting it.
 func SetSetting(key, value string) error {
-	if err := Init(); err != nil {
+	database, err := getInitializedDB()
+	if err != nil {
 		return err
 	}
-	return dbInstance.SetSetting(key, value)
+	return database.SetSetting(key, value)
 }
 
 // GetAllSettings returns all settings as a key→value map.
 func GetAllSettings() (map[string]string, error) {
-	if err := Init(); err != nil {
+	database, err := getInitializedDB()
+	if err != nil {
 		return nil, err
 	}
-	return dbInstance.GetAllSettings()
+	return database.GetAllSettings()
 }
 
 // BulkSetSettings stores multiple key/value pairs atomically.
 func BulkSetSettings(settings map[string]string) error {
-	if err := Init(); err != nil {
+	database, err := getInitializedDB()
+	if err != nil {
 		return err
 	}
 	var lastErr error
 	for k, v := range settings {
-		if err := dbInstance.SetSetting(k, v); err != nil {
+		if err := database.SetSetting(k, v); err != nil {
 			logger.GetLogger().Warnf("[WARN] Failed to save setting %s: %v", k, err)
 			lastErr = err
 		}

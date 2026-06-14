@@ -495,10 +495,20 @@ func scanFFuf(c *gin.Context) {
 	if !bindOrBad(c, &req) {
 		return
 	}
-	if !requireField(c, req.Target, "target URL") {
+
+	// Accept both 'target' and 'url' fields from the frontend.
+	var target string
+	if req.Target != nil && *req.Target != "" {
+		target = *req.Target
+	} else if req.URL != nil && *req.URL != "" {
+		target = *req.URL
+	}
+
+	if target == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target URL is required (provide 'target' or 'url')"})
 		return
 	}
-	target := *req.Target
+
 	opts := ffufmod.Options{Target: target}
 	if req.Wordlist != nil {
 		opts.Wordlist = *req.Wordlist

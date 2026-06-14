@@ -89,4 +89,60 @@
     renderCategoryBadge,
     copyAllScanResults,
   };
+
+  function previewDataToFlatRows(data, fileMeta) {
+    const fileName = (fileMeta && fileMeta.file_name) || '';
+    const module = (fileMeta && fileMeta.module) || window.detectModuleFromFileName(fileName);
+    const source = (fileMeta && fileMeta.source) || '—';
+    const base = { file: fileName, module, source };
+
+    if (!data) return [];
+
+    if (data.format === 'json-array' && Array.isArray(data.items)) {
+      return data.items.map((item) => {
+        if (typeof item === 'string') {
+          return { ...base, target: item, finding: item, severity: '—' };
+        }
+        return {
+          ...base,
+          target: item['matched-at'] || item.matchedAt || item.url || item.URL || item.host || item.Host || item.target || item.domain || '—',
+          finding: item['info.name'] || item.title || item.finding || item.template || item.vulnerability || item.note || item.type || item.key || item.path || JSON.stringify(item).slice(0, 120),
+          severity: item['info.severity'] || item.severity || item.Severity || '—',
+          ...item,
+        };
+      });
+    }
+
+    if (data.format === 'json-object' && data.data) {
+      const obj = data.data;
+      let items = [];
+      for (const key of ['results', 'findings', 'matches', 'issues', 'vulnerabilities', 'data', 'items', 'hosts', 'subdomains']) {
+        if (Array.isArray(obj[key])) { items = obj[key]; break; }
+      }
+      if (!items.length && typeof obj === 'object') items = [obj];
+      return items.map((item) => {
+        if (typeof item === 'string') {
+          return { ...base, target: item, finding: item, severity: '—' };
+        }
+        return {
+          ...base,
+          target: item['matched-at'] || item.matchedAt || item.url || item.URL || item.host || item.Host || item.target || item.domain || '—',
+          finding: item['info.name'] || item.title || item.finding || item.template || item.vulnerability || item.note || item.type || item.key || item.path || JSON.stringify(item).slice(0, 120),
+          severity: item['info.severity'] || item.severity || item.Severity || '—',
+          ...item,
+        };
+      });
+    }
+
+    if (data.format === 'text' && Array.isArray(data.lines)) {
+      return data.lines
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .map((line) => ({ ...base, target: line, finding: line, severity: '—' }));
+    }
+
+    return [];
+  }
+
+  window.previewDataToFlatRows = previewDataToFlatRows;
 })();

@@ -23,6 +23,11 @@ import (
 	"github.com/h0tak88r/AutoAR/internal/utils"
 )
 
+func isVPNSafeMode() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("AUTOAR_VPN_SAFE")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
 // Options holds ffuf scan options
 type Options struct {
 	Target          string
@@ -71,6 +76,12 @@ func RunFFuf(opts Options) (*Result, error) {
 
 	if opts.Threads <= 0 {
 		opts.Threads = 40
+	}
+
+	// VPN-safe: reduce threads when behind a tunnel.
+	if isVPNSafeMode() && opts.Threads > 20 {
+		opts.Threads = 20
+		logger.GetLogger().Infof("[VPN-SAFE] FFuf threads reduced to %d", opts.Threads)
 	}
 
 	// Default wordlist

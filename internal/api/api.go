@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +45,8 @@ var (
 
 	scanResults           = make(map[string]*ScanResult)
 	scanResultsTotalBytes int64
+	scanResultsOrder      = list.New() // LRU tracking: front = oldest, back = newest
+	scanResultsElements   = make(map[string]*list.Element)
 	apiScansMutex         sync.RWMutex
 
 	// scanSemaphore limits concurrent child-process scans (#2 rate limiting).
@@ -92,23 +95,29 @@ func scanResultSizeBytes(r *ScanResult) int64 {
 func storeScanResultLocked(scanID string, result *ScanResult) {
 	if old, ok := scanResults[scanID]; ok {
 		scanResultsTotalBytes -= scanResultSizeBytes(old)
+		// Move to back of list (most recently used)
+		if elem, exists := scanResultsElements[scanID]; exists {
+			scanResultsOrder.MoveToBack(elem)
+		}
+	} else {
+		// New entry — append to back of list
+		elem := scanResultsOrder.PushBack(scanID)
+		scanResultsElements[scanID] = elem
 	}
 	scanResults[scanID] = result
 	scanResultsTotalBytes += scanResultSizeBytes(result)
+
+	// O(1) eviction: remove from front (oldest) until within limits
 	for len(scanResults) > maxScanResults || scanResultsTotalBytes > maxScanResultsBytes {
-		var oldest string
-		var oldestTime time.Time
-		for id, r := range scanResults {
-			if oldest == "" || r.StartedAt.Before(oldestTime) {
-				oldest = id
-				oldestTime = r.StartedAt
-			}
-		}
-		if oldest == "" {
+		front := scanResultsOrder.Front()
+		if front == nil {
 			break
 		}
-		scanResultsTotalBytes -= scanResultSizeBytes(scanResults[oldest])
-		delete(scanResults, oldest)
+		oldestID := front.Value.(string)
+		scanResultsOrder.Remove(front)
+		delete(scanResultsElements, oldestID)
+		scanResultsTotalBytes -= scanResultSizeBytes(scanResults[oldestID])
+		delete(scanResults, oldestID)
 	}
 }
 
@@ -211,7 +220,7 @@ type scanOutputCapture struct {
 	mu        sync.Mutex
 	maxBytes  int
 	buf       bytes.Buffer
-	lineBuf   string
+	lineBuf   []byte
 	resultURL string
 	truncated bool
 }
@@ -240,17 +249,17 @@ func (s *scanOutputCapture) Write(p []byte) (int, error) {
 		s.truncated = true
 	}
 
-	// Parse line-by-line for R2 URLs without storing full output.
-	s.lineBuf += string(p)
+	// Parse line-by-line for R2 URLs using byte buffer (avoids string allocation pressure).
+	s.lineBuf = append(s.lineBuf, p...)
 	for {
-		idx := strings.IndexByte(s.lineBuf, '\n')
+		idx := bytes.IndexByte(s.lineBuf, '\n')
 		if idx < 0 {
 			break
 		}
-		line := strings.TrimSpace(s.lineBuf[:idx])
+		line := bytes.TrimSpace(s.lineBuf[:idx])
 		s.lineBuf = s.lineBuf[idx+1:]
-		if s.resultURL == "" && (strings.Contains(line, "Results zip uploaded:") || strings.Contains(line, "Zip file uploaded:")) {
-			if u := utils.ExtractFirstHTTPURL(line); u != "" {
+		if s.resultURL == "" && (bytes.Contains(line, []byte("Results zip uploaded:")) || bytes.Contains(line, []byte("Zip file uploaded:"))) {
+			if u := utils.ExtractFirstHTTPURL(string(line)); u != "" {
 				s.resultURL = u
 			}
 		}
@@ -258,14 +267,20 @@ func (s *scanOutputCapture) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (s *scanOutputCapture) OutputString() string {
+func (s *scanOutputCapture) OutputBytes() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := s.buf.String()
+	out := s.buf.Bytes()
+	result := make([]byte, len(out))
+	copy(result, out)
 	if s.truncated {
-		out += "\n[output truncated for memory safety]\n"
+		result = append(result, []byte("\n[output truncated for memory safety]\n")...)
 	}
-	return out
+	return result
+}
+
+func (s *scanOutputCapture) OutputString() string {
+	return string(s.OutputBytes())
 }
 
 func (s *scanOutputCapture) ResultURL() string {
@@ -275,10 +290,10 @@ func (s *scanOutputCapture) ResultURL() string {
 		return s.resultURL
 	}
 	// Best-effort: inspect trailing buffered partial line.
-	if s.lineBuf != "" {
-		line := strings.TrimSpace(s.lineBuf)
-		if strings.Contains(line, "Results zip uploaded:") || strings.Contains(line, "Zip file uploaded:") {
-			if u := utils.ExtractFirstHTTPURL(line); u != "" {
+	if len(s.lineBuf) > 0 {
+		line := bytes.TrimSpace(s.lineBuf)
+		if bytes.Contains(line, []byte("Results zip uploaded:")) || bytes.Contains(line, []byte("Zip file uploaded:")) {
+			if u := utils.ExtractFirstHTTPURL(string(line)); u != "" {
 				s.resultURL = u
 			}
 		}
@@ -1186,38 +1201,27 @@ func downloadScanResults(c *gin.Context) {
 		return
 	}
 
-	// Create temporary file
-	tmpFile, err := os.CreateTemp("", fmt.Sprintf("scan-%s-*.txt", scanID))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create temp file"})
-		return
-	}
-	defer os.Remove(tmpFile.Name())
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=scan-%s-results.txt", scanID))
+	c.Header("Content-Type", "text/plain; charset=utf-8")
 
-	// Write results to file
-	fmt.Fprintf(tmpFile, "Scan ID: %s\n", scanID)
-	fmt.Fprintf(tmpFile, "Scan Type: %s\n", scan.ScanType)
-	fmt.Fprintf(tmpFile, "Status: %s\n", scan.Status)
-	fmt.Fprintf(tmpFile, "Started: %s\n", scan.StartedAt.Format(time.RFC3339))
+	fmt.Fprintf(c.Writer, "Scan ID: %s\n", scanID)
+	fmt.Fprintf(c.Writer, "Scan Type: %s\n", scan.ScanType)
+	fmt.Fprintf(c.Writer, "Status: %s\n", scan.Status)
+	fmt.Fprintf(c.Writer, "Started: %s\n", scan.StartedAt.Format(time.RFC3339))
 	if scan.CompletedAt != nil {
-		fmt.Fprintf(tmpFile, "Completed: %s\n", scan.CompletedAt.Format(time.RFC3339))
+		fmt.Fprintf(c.Writer, "Completed: %s\n", scan.CompletedAt.Format(time.RFC3339))
 	}
-	fmt.Fprintf(tmpFile, "\n%s\n", strings.Repeat("=", 80))
-	fmt.Fprintf(tmpFile, "OUTPUT:\n")
-	fmt.Fprintf(tmpFile, "%s\n\n", strings.Repeat("=", 80))
-	fmt.Fprintf(tmpFile, "%s\n", scan.Output)
+	fmt.Fprintf(c.Writer, "\n%s\n", strings.Repeat("=", 80))
+	fmt.Fprintf(c.Writer, "OUTPUT:\n")
+	fmt.Fprintf(c.Writer, "%s\n\n", strings.Repeat("=", 80))
+	fmt.Fprintf(c.Writer, "%s\n", scan.Output)
 
 	if scan.Error != "" {
-		fmt.Fprintf(tmpFile, "\n\n%s\n", strings.Repeat("=", 80))
-		fmt.Fprintf(tmpFile, "ERRORS:\n")
-		fmt.Fprintf(tmpFile, "%s\n\n", strings.Repeat("=", 80))
-		fmt.Fprintf(tmpFile, "%s\n", scan.Error)
+		fmt.Fprintf(c.Writer, "\n\n%s\n", strings.Repeat("=", 80))
+		fmt.Fprintf(c.Writer, "ERRORS:\n")
+		fmt.Fprintf(c.Writer, "%s\n\n", strings.Repeat("=", 80))
+		fmt.Fprintf(c.Writer, "%s\n", scan.Error)
 	}
-
-	tmpFile.Close()
-
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=scan-%s-results.txt", scanID))
-	c.File(tmpFile.Name())
 }
 
 // Helper functions
@@ -1399,7 +1403,7 @@ func executeScan(scanID string, command []string, scanType string) {
 	ScansMutex.Unlock()
 
 	err := cmd.Wait()
-	output := []byte(capture.OutputString())
+	output := capture.OutputBytes()
 	completedAt := time.Now()
 
 	ScansMutex.Lock()

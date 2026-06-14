@@ -608,7 +608,19 @@
                 if (this.device.configuration?.configurationValue !== info.cfg.configurationValue) {
                     await this.device.selectConfiguration(info.cfg.configurationValue);
                 }
-                await this.device.claimInterface(info.iface.interfaceNumber);
+                try {
+                    await this.device.claimInterface(info.iface.interfaceNumber);
+                } catch (claimErr) {
+                    const msg = claimErr.message || String(claimErr);
+                    if (msg.includes('claim') || msg.includes('Unable') || msg.includes('busy')) {
+                        try { await this.device.close(); } catch (_) {}
+                        throw new ADBError(
+                            'A porta USB esta bloqueada por outro processo. Por favor, abra o seu terminal, execute \'adb kill-server\' e tente novamente.',
+                            ErrorType.DEVICE_BUSY
+                        );
+                    }
+                    throw new ADBError('Failed to claim USB interface: ' + msg, ErrorType.DEVICE_BUSY);
+                }
                 this.inEndpoint = info.inEp;
                 this.outEndpoint = info.outEp;
                 log('USB interface claimed successfully');
@@ -978,8 +990,17 @@
             log('Disconnecting');
             this.connected = false;
             this.connectionLost = true;
-            if (this.device?.opened) {
-                try { await this.device.close(); } catch {}
+            if (this.device) {
+                try {
+                    if (this.device.opened) {
+                        // Release the interface before closing
+                        const info = this.findInterface?.call({ device: this.device }) || null;
+                        if (info) {
+                            try { await this.device.releaseInterface(info.iface.interfaceNumber); } catch (_) {}
+                        }
+                        try { await this.device.close(); } catch (_) {}
+                    }
+                } catch (_) { /* ignore cleanup errors */ }
             }
             this.device = null;
             this.deviceDescriptor = null;

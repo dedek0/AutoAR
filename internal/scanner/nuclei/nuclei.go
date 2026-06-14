@@ -18,6 +18,24 @@ import (
 	nucleiOutput "github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
 
+// isVPNSafeMode returns true when running behind a VPN tunnel that cannot
+// handle aggressive packet bursts (e.g. Gluetun/WireGuard).
+func isVPNSafeMode() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("AUTOAR_VPN_SAFE")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+// vpnSafeConcurrency reduces threads/concurrency when behind a VPN tunnel.
+func vpnSafeConcurrency(threads int) int {
+	if !isVPNSafeMode() {
+		return threads
+	}
+	if threads > 20 {
+		threads = 20
+	}
+	return threads
+}
+
 // ScanMode represents the nuclei scan mode
 type ScanMode string
 
@@ -534,6 +552,16 @@ func runNucleiCommand(targetFile, templateDir string, threads int, outputFile st
 	}
 	defer jsonWriter.Close()
 
+	// VPN-safe: reduce concurrency and add rate limits when behind a tunnel.
+	threads = vpnSafeConcurrency(threads)
+	templateConcurrency := max(1, min(threads, 25))
+	hostConcurrency := max(1, threads)
+	if isVPNSafeMode() {
+		templateConcurrency = max(1, min(threads, 10))
+		hostConcurrency = max(1, min(threads, 10))
+		logger.GetLogger().Infof("[VPN-SAFE] Nuclei throttled: threads=%d, template_concurrency=%d, host_concurrency=%d", threads, templateConcurrency, hostConcurrency)
+	}
+
 	logger.GetLogger().Infof("[EXEC] Running nuclei SDK with templates: %s (targets=%d, threads=%d)", templateDir, len(targets), threads)
 	if err := ensureNucleiIgnoreFile(); err != nil {
 		logger.GetLogger().Infof("[WARN] Failed to prepare nuclei ignore file: %v", err)
@@ -546,8 +574,8 @@ func runNucleiCommand(targetFile, templateDir string, threads int, outputFile st
 			Templates: []string{templateDir},
 		}),
 		nucleiSDK.WithConcurrency(nucleiSDK.Concurrency{
-			TemplateConcurrency:           max(1, min(threads, 25)),
-			HostConcurrency:               max(1, threads),
+			TemplateConcurrency:           templateConcurrency,
+			HostConcurrency:               hostConcurrency,
 			HeadlessHostConcurrency:       max(1, min(threads, 10)),
 			HeadlessTemplateConcurrency:   max(1, min(threads, 10)),
 			JavascriptTemplateConcurrency: max(1, min(threads, 10)),

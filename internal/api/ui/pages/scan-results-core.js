@@ -1,4 +1,52 @@
 (() => {
+  const VISIBLE_ROWS = 500;
+  const MAX_RENDER_ROWS = 1000;
+
+  // Lazy-init Web Worker for heavy JSON parsing
+  let _jsonWorker = null;
+  let _workerIdCounter = 0;
+  let _workerCallbacks = {};
+
+  function getJSONWorker() {
+    if (_jsonWorker) return _jsonWorker;
+    try {
+      _jsonWorker = new Worker('/ui/pages/json-parse-worker.js');
+      _jsonWorker.onmessage = function(e) {
+        const { id, items, error } = e.data;
+        const cb = _workerCallbacks[id];
+        if (cb) {
+          delete _workerCallbacks[id];
+          if (error) cb.reject(new Error(error));
+          else cb.resolve(items);
+        }
+      };
+      _jsonWorker.onerror = function() {
+        _jsonWorker = null;
+      };
+    } catch (_) {
+      _jsonWorker = null;
+    }
+    return _jsonWorker;
+  }
+
+  function parseJSONInBackground(data, sortKey) {
+    const worker = getJSONWorker();
+    if (!worker) {
+      // Fallback: parse synchronously
+      try {
+        let items = typeof data === 'string' ? JSON.parse(data) : data;
+        return Promise.resolve(items);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++_workerIdCounter;
+      _workerCallbacks[id] = { resolve, reject };
+      worker.postMessage({ id, data, sortKey });
+    });
+  }
+
   function parseNucleiFindingLine(line) {
     const s = String(line || '').trim();
     if (!s) return null;
@@ -135,7 +183,19 @@
         return;
       }
 
-      container.innerHTML = window.renderResultTable(items, resultType, file);
+      // Virtual scrolling: cap rendered rows to prevent Main Thread freeze.
+      const totalItems = items.length;
+      const renderedItems = items.slice(0, MAX_RENDER_ROWS);
+
+      let html = window.renderResultTable(renderedItems, resultType, file);
+
+      if (totalItems > MAX_RENDER_ROWS) {
+        html += `<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:12px;border-top:1px solid var(--border)">
+          Showing ${MAX_RENDER_ROWS} of ${totalItems} items (truncated for performance)
+        </div>`;
+      }
+
+      container.innerHTML = html;
     } catch (e) {
       container.innerHTML = `<div style="padding:20px;color:var(--accent-red)">Error loading results: ${window.esc(e.message)}</div>`;
     }
@@ -146,5 +206,6 @@
     groupFilesByModule,
     detectResultType,
     parseAndRenderResults,
+    parseJSONInBackground,
   };
 })();

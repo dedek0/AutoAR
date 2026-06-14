@@ -83,21 +83,22 @@ func (wp *WorkerPool) Wait() error {
 
 // --- Existing types preserved for backward compatibility ---
 
-// ConcurrentFileUploader handles concurrent file uploads with rate limiting
+// ConcurrentFileUploader handles concurrent file uploads with rate limiting.
+// Refactored to use errgroup + semaphore for proper context cancellation.
 type ConcurrentFileUploader struct {
 	maxConcurrent int
-	semaphore     chan struct{}
+	sem           *semaphore.Weighted
 }
 
 // NewConcurrentFileUploader creates a new concurrent file uploader.
 // If maxConcurrent <= 0, uses global config default.
 func NewConcurrentFileUploader(maxConcurrent int) *ConcurrentFileUploader {
 	if maxConcurrent <= 0 {
-		maxConcurrent = 25 // default aligned with global concurrency
+		maxConcurrent = 25
 	}
 	return &ConcurrentFileUploader{
 		maxConcurrent: maxConcurrent,
-		semaphore:     make(chan struct{}, maxConcurrent),
+		sem:           semaphore.NewWeighted(int64(maxConcurrent)),
 	}
 }
 
@@ -108,42 +109,33 @@ type UploadResult struct {
 	Error    error
 }
 
-// UploadFiles uploads multiple files concurrently
+// UploadFiles uploads multiple files concurrently.
+// Uses errgroup with proper context cancellation — if ctx is cancelled,
+// pending uploads are abandoned immediately instead of blocking on the channel.
 func (u *ConcurrentFileUploader) UploadFiles(
 	ctx context.Context,
 	files []string,
 	uploadFunc func(string) error,
 ) []UploadResult {
-	var wg sync.WaitGroup
 	results := make([]UploadResult, len(files))
 
+	g, gctx := errgroup.WithContext(ctx)
 	for i, file := range files {
-		wg.Add(1)
-		go func(index int, filePath string) {
-			defer wg.Done()
-
-			select {
-			case u.semaphore <- struct{}{}:
-				defer func() { <-u.semaphore }()
-			case <-ctx.Done():
-				results[index] = UploadResult{
-					FilePath: filePath,
-					Success:  false,
-					Error:    ctx.Err(),
-				}
-				return
+		index, filePath := i, file
+		g.Go(func() error {
+			if err := u.sem.Acquire(gctx, 1); err != nil {
+				results[index] = UploadResult{FilePath: filePath, Success: false, Error: err}
+				return nil // don't abort other uploads
 			}
+			defer u.sem.Release(1)
 
 			err := uploadFunc(filePath)
-			results[index] = UploadResult{
-				FilePath: filePath,
-				Success:  err == nil,
-				Error:    err,
-			}
-		}(i, file)
+			results[index] = UploadResult{FilePath: filePath, Success: err == nil, Error: err}
+			return nil
+		})
 	}
 
-	wg.Wait()
+	_ = g.Wait()
 	return results
 }
 

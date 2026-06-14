@@ -65,7 +65,7 @@ var migrationRegistry = []Migration{
 // RunMigrations applies all pending migrations atomically.
 // Safe to call on every startup — already-applied migrations are skipped.
 func RunMigrations() error {
-	if dbInstance == nil {
+	if getDB() == nil {
 		if err := Init(); err != nil {
 			return fmt.Errorf("migration: db init: %w", err)
 		}
@@ -78,17 +78,17 @@ func RunMigrations() error {
 
 // runMigrationsLocked applies pending migrations. Caller must hold initMu.
 func runMigrationsLocked() error {
-	if dbInstance == nil {
+	if getDB() == nil {
 		return nil
 	}
 
 	// Ensure schema_migrations table exists (SQLite-compatible)
-	if err := dbInstance.execMigrationsDDL(); err != nil {
+	if err := getDB().execMigrationsDDL(); err != nil {
 		return fmt.Errorf("migration: create tracking table: %w", err)
 	}
 
 	// Load applied migration IDs
-	applied, err := dbInstance.loadAppliedMigrationIDs()
+	applied, err := getDB().loadAppliedMigrationIDs()
 	if err != nil {
 		return fmt.Errorf("migration: load applied: %w", err)
 	}
@@ -109,11 +109,11 @@ func runMigrationsLocked() error {
 		logger.GetLogger().Infof("[MIGRATION] Applying %s: %s", m.ID, m.Name)
 		start := time.Now()
 
-		if err := dbInstance.execMigrationSQL(m.Up); err != nil {
+		if err := getDB().execMigrationSQL(m.Up); err != nil {
 			return fmt.Errorf("migration %s (%s) failed: %w", m.ID, m.Name, err)
 		}
 
-		if err := dbInstance.recordMigrationApplied(m.ID, m.Name); err != nil {
+		if err := getDB().recordMigrationApplied(m.ID, m.Name); err != nil {
 			return fmt.Errorf("migration %s: record failed: %w", m.ID, err)
 		}
 
@@ -129,28 +129,28 @@ func execMigrationsDDL() error {
 	// Use the global facade — it handles dialect internally
 	initMu.Lock()
 	defer initMu.Unlock()
-	return dbInstance.execMigrationsDDL()
+	return getDB().execMigrationsDDL()
 }
 
 // applyMigration executes a migration's SQL using the global DB facade.
 func applyMigration(m Migration) error {
 	initMu.Lock()
 	defer initMu.Unlock()
-	return dbInstance.execMigrationSQL(m.Up)
+	return getDB().execMigrationSQL(m.Up)
 }
 
 // loadAppliedMigrations returns a set of already-applied migration IDs.
 func loadAppliedMigrations() (map[string]bool, error) {
 	initMu.Lock()
 	defer initMu.Unlock()
-	return dbInstance.loadAppliedMigrationIDs()
+	return getDB().loadAppliedMigrationIDs()
 }
 
 // recordMigration inserts a migration record after successful application.
 func recordMigration(m Migration) error {
 	initMu.Lock()
 	defer initMu.Unlock()
-	return dbInstance.recordMigrationApplied(m.ID, m.Name)
+	return getDB().recordMigrationApplied(m.ID, m.Name)
 }
 
 // RegisterMigration adds a migration at runtime (for plugins or test fixtures).

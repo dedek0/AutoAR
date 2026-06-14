@@ -111,6 +111,7 @@ roots.txt
 .evn.example
 .sql.gz
 autoar
+!cmd/autoar/
 .db-shm
 .db-wal
 

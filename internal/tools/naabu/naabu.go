@@ -13,6 +13,11 @@ import (
 	"github.com/projectdiscovery/naabu/v2/pkg/runner"
 )
 
+func isVPNSafeMode() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("AUTOAR_VPN_SAFE")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
 type PortOpen struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
@@ -92,6 +97,13 @@ func ScanFromFile(subsFile string, threads int, outFile string) (int, []PortOpen
 		Timeout:  5,
 		Retries:  1,
 		OnResult: onResult,
+	}
+
+	// VPN-safe: reduce rate and increase timeout when behind a tunnel.
+	if isVPNSafeMode() {
+		options.Rate = 500
+		options.Timeout = 10
+		options.Retries = 2
 	}
 
 	r, err := runner.NewRunner(options)
