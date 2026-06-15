@@ -1336,8 +1336,20 @@ function setupExport() {
 }
 
 function setupTheme() {
-    document.documentElement.dataset.theme = 'dark';
-    localStorage.removeItem('theme');
+    const saved = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = saved || (prefersDark ? 'dark' : 'light');
+    document.documentElement.dataset.theme = theme;
+
+    const btn = $('#themeToggle');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            const current = document.documentElement.dataset.theme;
+            const next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.dataset.theme = next;
+            localStorage.setItem('theme', next);
+        });
+    }
 }
 
 function setupDragDrop() {

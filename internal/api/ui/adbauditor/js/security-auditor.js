@@ -1,4 +1,4 @@
-/** @preserve @license MIT */
+/** @preserve @author Sandeep Wawdane @license MIT */
 (function(global) {
     'use strict';
 
@@ -118,19 +118,28 @@
             };
 
             try {
-                const dumpsys = await this.adb.shell(`dumpsys package ${packageName} | grep -i "flags\\|allowBackup"`);
-                
-                if (dumpsys.toLowerCase().includes('allow_backup') || 
-                    !dumpsys.toLowerCase().includes('disallow_backup')) {
+                const dumpsys = await this.adb.shell(`dumpsys package ${packageName}`);
+                const flagsMatch = dumpsys.match(/flags=\[([^\]]*)\]/);
+                const flags = flagsMatch ? flagsMatch[1] : '';
+                const allowBackup = /ALLOW_BACKUP/.test(flags);
+                if (allowBackup) {
                     results.findings.push({
                         type: 'backup_enabled',
-                        note: 'App allows backup (android:allowBackup=true or not set)',
+                        note: 'ALLOW_BACKUP flag set: app data backed up via adb backup / Google Drive auto-backup',
+                        location: 'AndroidManifest.xml',
+                        evidence: flags,
                         recommendation: 'Set android:allowBackup="false" or implement BackupAgent to exclude sensitive data'
                     });
                     results.severity = 'medium';
                     results.status = 'fail';
+                } else {
+                    results.findings.push({
+                        type: 'backup_disabled',
+                        note: 'ALLOW_BACKUP not in package flags - backup disabled or controlled by BackupAgent',
+                        evidence: flags
+                    });
+                    results.status = 'pass';
                 }
-
             } catch (e) {
                 results.status = 'error';
                 results.error = e.message;
@@ -156,11 +165,16 @@
             };
 
             try {
-                await this.adb.shell('logcat -c');
-                
+                await this.adb.shell('logcat -c').catch(() => {});
                 await new Promise(r => setTimeout(r, 1000));
-                
-                const logs = await this.adb.shell(`logcat -d -v brief | grep -i "${packageName}" | tail -100`);
+                let pid = '';
+                try {
+                    const pidout = await this.adb.shell(`pidof ${packageName}`);
+                    pid = (pidout || '').trim().split(/\s+/)[0] || '';
+                } catch (_) {}
+                const logs = pid
+                    ? await this.adb.shell(`logcat -d -v brief --pid=${pid} | tail -200`)
+                    : await this.adb.shell(`logcat -d -v brief | grep -F "${packageName.replace(/"/g, '')}" | tail -200`);
                 
                 const sensitivePatterns = [
                     { pattern: /password[=:]\s*\S+/gi, type: 'password' },
@@ -172,14 +186,22 @@
                     { pattern: /secret[=:]\s*\S+/gi, type: 'secret' }
                 ];
 
+                const logLines = logs.split('\n');
                 for (const { pattern, type } of sensitivePatterns) {
-                    const matches = logs.match(pattern);
-                    if (matches && matches.length > 0) {
+                    const matches = [];
+                    for (const ln of logLines) {
+                        if (pattern.global) pattern.lastIndex = 0;
+                        const m = ln.match(pattern);
+                        if (m && m.length > 0) matches.push({ line: ln.trim().slice(0, 280), match: m[0].slice(0, 120) });
+                        if (matches.length >= 20) break;
+                    }
+                    if (matches.length > 0) {
                         results.findings.push({
                             type: 'sensitive_log',
                             dataType: type,
                             count: matches.length,
-                            note: `Found ${matches.length} potential ${type} value(s) in logs`
+                            note: `${matches.length} potential ${type} value(s) in logs`,
+                            instances: matches
                         });
                         results.severity = 'high';
                         results.status = 'fail';
@@ -521,24 +543,30 @@
             };
 
             try {
-                const dumpsys = await this.adb.shell(`dumpsys package ${packageName} | grep -i "flags\\|debuggable"`);
-                
-                if (dumpsys.toLowerCase().includes('debuggable')) {
+                const dumpsys = await this.adb.shell(`dumpsys package ${packageName}`);
+                const flagsMatch = dumpsys.match(/flags=\[([^\]]*)\]/);
+                const flags = flagsMatch ? flagsMatch[1] : '';
+                if (/\bDEBUGGABLE\b/.test(flags)) {
                     results.findings.push({
                         type: 'debuggable',
-                        note: 'Application is debuggable - allows runtime manipulation via JDWP',
+                        note: 'DEBUGGABLE flag set - allows runtime manipulation via JDWP',
+                        location: 'AndroidManifest.xml',
+                        evidence: flags,
                         severity: 'critical'
                     });
                     results.severity = 'critical';
                     results.status = 'fail';
                 }
 
-                const cert = await this.adb.shell(`pm dump ${packageName} | grep -i "signatures\\|debug"`);
-                if (cert && cert.toLowerCase().includes('debug')) {
+                const signers = await this.adb.shell(`dumpsys package ${packageName} | grep -E "signatures|signerVer|installer"`);
+                if (/Android Debug|CN=Android Debug|CN=Android,/i.test(signers || '')) {
                     results.findings.push({
                         type: 'debug_certificate',
-                        note: 'App may be signed with debug certificate'
+                        note: 'Signed with the well-known Android debug key (CN=Android Debug, O=Android, C=US)',
+                        evidence: (signers || '').trim().split('\n').slice(0, 3).join(' | ')
                     });
+                    results.status = results.status === 'pass' ? 'fail' : results.status;
+                    results.severity = 'high';
                 }
 
             } catch (e) {

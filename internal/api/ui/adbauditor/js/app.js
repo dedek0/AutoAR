@@ -612,10 +612,7 @@
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                         Full Security Scan
                     </div>
-                    <div style="display:flex;gap:8px;align-items:center">
-                        <button class="btn btn-ghost" id="exportFindingsBtn" type="button" title="Export current findings" disabled>Export</button>
-                        <span class="badge warning">Comprehensive</span>
-                    </div>
+                    <span class="badge warning">Comprehensive</span>
                 </div>
                 <p class="panel-desc">Run all security tests against a single application. Checks storage, backup, components, signing, network, permissions, and more.</p>
                 <div class="form-row">
@@ -1912,23 +1909,6 @@
                     bar.style.width = Math.round((current / total) * 100) + '%';
                 });
                 progress.classList.add('hidden');
-                let deviceMeta = {};
-                try {
-                    const props = await adb.getDeviceProps();
-                    deviceMeta = {
-                        model: props.model, brand: props.brand, android: props.androidVersion,
-                        sdk: props.sdkVersion, serial: props.serial, buildId: props.buildId,
-                    };
-                } catch (_) {}
-                state.lastScanResults = {
-                    package: pkg,
-                    timestamp: scanResult.timestamp,
-                    device: deviceMeta,
-                    summary: scanResult.summary,
-                    tests: scanResult.tests,
-                };
-                const expBtn = document.getElementById('exportFindingsBtn');
-                if (expBtn) expBtn.disabled = false;
                 let html = '<div class="result-box" style="margin-top:12px">';
                 html += `<div class="result-header"><strong>Scan Report: ${escapeHtml(pkg)}</strong><span style="color:var(--lum-40);font-size:12px;margin-left:auto">${escapeHtml(scanResult.timestamp)}</span></div>`;
                 html += '<div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">';
@@ -1939,7 +1919,7 @@
                 html += '</div></div>';
                 for (const test of scanResult.tests) {
                     const badge = test.status === 'pass' ? 'pass' : test.status === 'fail' ? 'fail' : test.status === 'review' ? 'warning' : '';
-                    const label = test.status === 'pass' ? '✓ Pass' : test.status === 'fail' ? '✗ Fail' : test.status === 'review' ? '⚠ Review' : '? Error';
+                    const label = test.status === 'pass' ? 'OK Pass' : test.status === 'fail' ? 'FAIL Fail' : test.status === 'review' ? '[!] Review' : '? Error';
                     html += `<div class="result-box" style="margin-top:8px"><div class="result-header"><span class="badge ${badge}">${label}</span><strong style="margin-left:8px">${escapeHtml(test.title || test.id)}</strong></div>`;
                     if (test.description) {
                         html += `<p style="margin-top:6px;color:var(--lum-50);font-size:12px">${escapeHtml(test.description)}</p>`;
@@ -1959,6 +1939,9 @@
                     }
                     html += '</div>';
                 }
+                const blob = new Blob([JSON.stringify(scanResult, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                html += `<div style="margin-top:16px;text-align:center"><a href="${url}" download="${escapeAttr(pkg)}_security_scan.json" class="btn btn-ghost" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:14px;height:14px"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>Download Full Report (JSON)</a></div>`;
                 results.innerHTML = html;
             } catch (e) {
                 progress.classList.add('hidden');
@@ -1966,86 +1949,6 @@
             }
         }
     };
-
-    function exportFindings(kind) {
-        const data = state.lastScanResults;
-        if (!data) { showToast('No findings to export yet', 'warning'); return; }
-        const pkg = (data.package || 'scan').replace(/[^A-Za-z0-9._-]/g, '_');
-        const ts = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-        if (kind === 'pdf') {
-            if (!window.ADBAuditorPDF || !window.ADBAuditorPDF.exportPDF) { showToast('PDF library not loaded', 'error'); return; }
-            try { window.ADBAuditorPDF.exportPDF(data); showToast('PDF report saved', 'success'); }
-            catch (e) { console.error(e); showToast('PDF export failed: ' + e.message, 'error'); }
-            return;
-        }
-        if (kind === 'json') {
-            const json = JSON.stringify({
-                tool: { name: 'ADB Auditor', version: '2.0' },
-                generatedAt: new Date().toISOString(),
-                package: data.package,
-                summary: data.summary,
-                findings: data.findings || data.tests || [],
-            }, null, 2);
-            downloadBlob(json, pkg + '_' + ts + '.json', 'application/json');
-        } else if (kind === 'sarif') {
-            const sarif = {
-                $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
-                version: '2.1.0',
-                runs: [{
-                    tool: { driver: { name: 'ADB Auditor', version: '2.0', informationUri: 'https://adbauditor.com' } },
-                    results: (data.tests || []).map(t => ({
-                        ruleId: t.id || t.title || 'unknown',
-                        level: t.status === 'fail' ? 'error' : t.status === 'review' ? 'warning' : 'none',
-                        message: { text: t.title || t.id || '' },
-                        locations: [{ physicalLocation: { artifactLocation: { uri: data.package || '' } } }],
-                    })),
-                }],
-            };
-            downloadBlob(JSON.stringify(sarif, null, 2), pkg + '_' + ts + '.sarif', 'application/sarif+json');
-        }
-    }
-
-    function downloadBlob(text, filename, mime) {
-        const blob = new Blob([text], { type: mime || 'application/octet-stream' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 800);
-    }
-
-    function showExportMenu(anchor) {
-        const existing = document.getElementById('exportFindingsMenu');
-        if (existing) { existing.remove(); return; }
-        const rect = anchor.getBoundingClientRect();
-        const menu = document.createElement('div');
-        menu.id = 'exportFindingsMenu';
-        menu.style.cssText = 'position:absolute;z-index:9999;background:var(--depth-4,#14151c);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:4px;min-width:200px;box-shadow:0 8px 24px rgba(0,0,0,0.4);';
-        menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
-        menu.style.left = (rect.left + window.scrollX) + 'px';
-        menu.innerHTML = '<button data-fmt="pdf"   type="button" style="display:block;width:100%;text-align:left;padding:8px 12px;background:none;border:none;color:var(--lum-90,#e8e9ed);cursor:pointer;border-radius:4px;font-size:13px"><span style="font-weight:500">PDF Report</span><br><small style="color:var(--lum-50,#6b6f82);font-size:11px">printable audit, every instance</small></button>' +
-                         '<button data-fmt="json"  type="button" style="display:block;width:100%;text-align:left;padding:8px 12px;background:none;border:none;color:var(--lum-90,#e8e9ed);cursor:pointer;border-radius:4px;font-size:13px"><span style="font-weight:500">JSON</span><br><small style="color:var(--lum-50,#6b6f82);font-size:11px">full result tree</small></button>' +
-                         '<button data-fmt="sarif" type="button" style="display:block;width:100%;text-align:left;padding:8px 12px;background:none;border:none;color:var(--lum-90,#e8e9ed);cursor:pointer;border-radius:4px;font-size:13px"><span style="font-weight:500">SARIF 2.1</span><br><small style="color:var(--lum-50,#6b6f82);font-size:11px">GitHub Code Scanning</small></button>';
-        document.body.appendChild(menu);
-        const close = () => { menu.remove(); document.removeEventListener('click', onDoc, true); };
-        const onDoc = (ev) => { if (!menu.contains(ev.target) && ev.target !== anchor) close(); };
-        setTimeout(() => document.addEventListener('click', onDoc, true), 0);
-        menu.addEventListener('click', (ev) => {
-            const b = ev.target.closest('[data-fmt]');
-            if (!b) return;
-            exportFindings(b.getAttribute('data-fmt'));
-            close();
-        });
-    }
-
-    document.addEventListener('click', (e) => {
-        const btn = e.target.closest('#exportFindingsBtn');
-        if (!btn || btn.disabled) return;
-        e.stopPropagation();
-        showExportMenu(btn);
-    });
-
     el.connectBtn.addEventListener('click', () => app.connect());
     el.disconnectBtn.addEventListener('click', () => app.disconnect());
     if (el.deviceSelect) {
@@ -2074,6 +1977,20 @@
     });
     navigate('overview');
     window.app = app;
+    function setupTheme() {
+        const stored = (() => { try { return localStorage.getItem('adba-theme'); } catch (_) { return null; } })();
+        const initial = stored === 'light' || stored === 'dark' ? stored
+            : (matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = initial;
+        const btn = document.getElementById('themeToggle');
+        if (btn) btn.addEventListener('click', () => {
+            const cur = document.documentElement.dataset.theme || 'dark';
+            const next = cur === 'dark' ? 'light' : 'dark';
+            document.documentElement.dataset.theme = next;
+            try { localStorage.setItem('adba-theme', next); } catch (_) {}
+        });
+    }
+    setupTheme();
     window.viewStorageFile = async function(encodedPath) {
         const path = safeDecode(encodedPath);
         const fileName = path.split('/').pop() || 'file';

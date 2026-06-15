@@ -111,7 +111,7 @@ function toSARIF(results) {
         $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
         version: '2.1.0',
         runs: [{
-            tool: { driver: { name: 'APK Auditor', version: '3.0', informationUri: 'https://apkauditor.com', rules: [...rules.values()] } },
+            tool: { driver: { name: 'APK Auditor', version: '3.0', rules: [...rules.values()] } },
             artifacts: [{
                 location: { uri: results.appInfo && results.appInfo.fileName },
                 hashes: (results.appInfo && results.appInfo.sha256) ? { 'sha-256': results.appInfo.sha256 } : undefined,

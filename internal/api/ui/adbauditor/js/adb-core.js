@@ -1,11 +1,10 @@
-/** @preserve @license MIT */
+/** @preserve @author Sandeep Wawdane @license MIT */
 (function(global) {
     'use strict';
 
-    const DEBUG = false;
     const BUILD_ID = 'U2FuZGVlcFc=';
-    function log(...args) { if (DEBUG) console.log('', ...args); }
-    function logError(...args) { console.error('', ...args); }
+    function log() {}
+    function logError(...args) { console.error('[ADB]', ...args); }
 
     const ADB = {
         VERSION: 0x01000001,
@@ -165,6 +164,87 @@
         async importKey(buf) {
             return crypto.subtle.importKey('pkcs8', buf, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-1' }, false, ['sign']);
         }
+    }
+
+    const SHA1_DIGEST_INFO = new Uint8Array([
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14
+    ]);
+
+    function bytesToBig(bytes) {
+        let r = 0n;
+        for (let i = 0; i < bytes.length; i++) r = (r << 8n) | BigInt(bytes[i]);
+        return r;
+    }
+    function bigToBytes(big, length) {
+        const out = new Uint8Array(length);
+        let v = big;
+        for (let i = length - 1; i >= 0; i--) { out[i] = Number(v & 0xFFn); v >>= 8n; }
+        return out;
+    }
+    function modPow(base, exp, mod) {
+        let r = 1n;
+        base = base % mod;
+        while (exp > 0n) {
+            if (exp & 1n) r = (r * base) % mod;
+            exp >>= 1n;
+            base = (base * base) % mod;
+        }
+        return r;
+    }
+    function parseRsaPrivateKeyFromPkcs8(pkcs8) {
+        const buf = pkcs8 instanceof Uint8Array ? pkcs8 : new Uint8Array(pkcs8);
+        let p = 0;
+        const readLen = () => {
+            const b = buf[p++];
+            if ((b & 0x80) === 0) return b;
+            const n = b & 0x7F;
+            let len = 0;
+            for (let i = 0; i < n; i++) len = (len << 8) | buf[p++];
+            return len;
+        };
+        const expect = (tag) => { if (buf[p] !== tag) throw new Error('PKCS#8 parse: expected 0x' + tag.toString(16) + ' at ' + p + ', got 0x' + (buf[p] || 0).toString(16)); p++; };
+        const readInt = () => {
+            expect(0x02);
+            const len = readLen();
+            let bytes = buf.subarray(p, p + len);
+            p += len;
+            if (bytes[0] === 0x00 && bytes.length > 1) bytes = bytes.subarray(1);
+            return bytesToBig(bytes);
+        };
+        const skipInt = () => { expect(0x02); const len = readLen(); p += len; };
+        expect(0x30); readLen();
+        skipInt();
+        expect(0x30);
+        const algLen = readLen();
+        const algEnd = p + algLen;
+        expect(0x06);
+        const oidLen = readLen();
+        p += oidLen;
+        if (p < algEnd && buf[p] === 0x05) { p++; readLen(); }
+        p = algEnd;
+        expect(0x04); readLen();
+        expect(0x30); readLen();
+        skipInt();
+        const n = readInt();
+        readInt();
+        const d = readInt();
+        return { n, d };
+    }
+    function rsaPkcs1SignRaw(pkcs8Buf, token) {
+        if (!(token instanceof Uint8Array)) token = new Uint8Array(token);
+        if (token.length !== 20) throw new Error('ADB auth token must be 20 bytes (SHA-1 digest); got ' + token.length);
+        const { n, d } = parseRsaPrivateKeyFromPkcs8(pkcs8Buf);
+        const keyByteLen = 256;
+        const padLen = keyByteLen - 3 - SHA1_DIGEST_INFO.length - token.length;
+        if (padLen < 8) throw new Error('RSA key too small for PKCS#1 padding');
+        const em = new Uint8Array(keyByteLen);
+        em[0] = 0x00; em[1] = 0x01;
+        for (let i = 2; i < 2 + padLen; i++) em[i] = 0xFF;
+        em[2 + padLen] = 0x00;
+        em.set(SHA1_DIGEST_INFO, 3 + padLen);
+        em.set(token, 3 + padLen + SHA1_DIGEST_INFO.length);
+        const sig = modPow(bytesToBig(em), d, n);
+        return bigToBytes(sig, keyByteLen);
     }
 
     function generatePublicKey(privKeyBuf) {
@@ -608,26 +688,18 @@
                 if (this.device.configuration?.configurationValue !== info.cfg.configurationValue) {
                     await this.device.selectConfiguration(info.cfg.configurationValue);
                 }
-                try {
-                    await this.device.claimInterface(info.iface.interfaceNumber);
-                } catch (claimErr) {
-                    const msg = claimErr.message || String(claimErr);
-                    if (msg.includes('claim') || msg.includes('Unable') || msg.includes('busy')) {
-                        try { await this.device.close(); } catch (_) {}
-                        throw new ADBError(
-                            'A porta USB esta bloqueada por outro processo. Por favor, abra o seu terminal, execute \'adb kill-server\' e tente novamente.',
-                            ErrorType.DEVICE_BUSY
-                        );
-                    }
-                    throw new ADBError('Failed to claim USB interface: ' + msg, ErrorType.DEVICE_BUSY);
-                }
+                await this.device.claimInterface(info.iface.interfaceNumber);
                 this.inEndpoint = info.inEp;
                 this.outEndpoint = info.outEp;
                 log('USB interface claimed successfully');
             } catch (e) {
                 if (e instanceof ADBError) throw e;
-                if (e.message?.includes('claimed')) {
-                    throw new ADBError('Device already in use. Close Chrome DevTools, Android Studio, or other ADB connections.', ErrorType.DEVICE_BUSY);
+                const m = (e && e.message || '').toLowerCase();
+                if (m.includes('claim') || m.includes('access denied') || m.includes('busy') || m.includes('unable to claim')) {
+                    const err = new ADBError('Device interface is busy. Another ADB client is holding it (terminal adb, another browser tab, Android Studio, scrcpy, Vysor). Run "adb kill-server" or close the other client, then retry.', ErrorType.DEVICE_BUSY);
+                    err.original = e.message;
+                    err.helpKey = 'claim';
+                    throw err;
                 }
                 throw new ADBError('Failed to open device: ' + e.message, ErrorType.UNKNOWN);
             }
@@ -785,6 +857,10 @@
                     return true;
                 } else if (pkt.cmd === ADB.CMD_AUTH) {
                     await this.handleAuth(pkt);
+                    if (this.connected) {
+                        log('Connected! Banner:', this.banner);
+                        return true;
+                    }
                 }
             }
         }
@@ -803,10 +879,9 @@
             const keys = await this.credentials.getKeys();
             for (const keyBuf of keys) {
                 try {
-                    const privKey = await this.credentials.importKey(keyBuf);
-                    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privKey, token);
+                    const sig = rsaPkcs1SignRaw(keyBuf, token);
                     log('>> AUTH_SIGNATURE');
-                    await this.send(makePacket(ADB.CMD_AUTH, ADB.AUTH_SIGNATURE, 0, new Uint8Array(sig)));
+                    await this.send(makePacket(ADB.CMD_AUTH, ADB.AUTH_SIGNATURE, 0, sig));
                     
                     const resp = await this.recvPacket();
                     if (resp.cmd === ADB.CMD_CNXN) {
@@ -990,17 +1065,8 @@
             log('Disconnecting');
             this.connected = false;
             this.connectionLost = true;
-            if (this.device) {
-                try {
-                    if (this.device.opened) {
-                        // Release the interface before closing
-                        const info = this.findInterface?.call({ device: this.device }) || null;
-                        if (info) {
-                            try { await this.device.releaseInterface(info.iface.interfaceNumber); } catch (_) {}
-                        }
-                        try { await this.device.close(); } catch (_) {}
-                    }
-                } catch (_) { /* ignore cleanup errors */ }
+            if (this.device?.opened) {
+                try { await this.device.close(); } catch {}
             }
             this.device = null;
             this.deviceDescriptor = null;
