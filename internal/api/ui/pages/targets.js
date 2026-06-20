@@ -18,7 +18,12 @@
   };
 
   function escapeSafe(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/'/g, '&#39;');
   }
 
   function renderPlatformCredFields(p, colors) {
@@ -330,5 +335,6 @@
     targetsAddAllDomains,
     targetsLaunchScan,
     targetsCopyAll,
+    targetsCopyOne,
   };
 })();

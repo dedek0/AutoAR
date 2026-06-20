@@ -34,7 +34,6 @@ Results are automatically uploaded to **Cloudflare R2 storage** and linked direc
 |  **JavaScript**      | Extract secrets, API endpoints, auth tokens from JS files                                                                              |
 |  **GitHub Recon**    | Org-level and repo-level scanning for secrets, dependency confusion                                                                    |
 |  **APK Auditor**     | Browser-based Android analysis: DEX decompiler, manifest + cert parsing, tracker detection, MASVS mapping, and regex-driven findings with APX secret patterns. (Based on [apkauditor](https://github.com/thecybersandeep/apkauditor) by @thecybersandeep) |
-|  **MITM Patch**      | Fetch any Android app by Package ID → auto-patch `network_security_config.xml` → re-sign → R2 download link in one click             |
 |  **IPA Auditor**     | Browser-based iOS IPA analysis: plist + Mach-O inspection, binary strings extraction, and findings tab powered by 200+ regex signatures plus MASVS-style rules. (Based on [ipaauditor](https://github.com/thecybersandeep/ipaauditor) by @thecybersandeep) |
 |  **ADB Auditor**    | Browser-based ADB security tool: USB device inspection, app enumeration, logcat tailing, file pull, activity launching. (Based on [adbauditor](https://github.com/thecybersandeep/adbauditor) by @thecybersandeep) |
 |  **Misconfigs**      | 100+ service misconfiguration checks                                                                                                   |
@@ -43,7 +42,7 @@ Results are automatically uploaded to **Cloudflare R2 storage** and linked direc
 |  **AI Agent**        | Full AI hunt loop from the CLI (`autoar agent` / `autoar explain`) — defaults to **deepseek-v4-flash-free via OpenCode Zen** — free tier, no card required |
 |  **R2 Storage**      | Auto-upload every non-empty result file to Cloudflare R2 and print the public URL                                                      |
 |  **Smart Alerts**    | Rich webhook notifications for zero-findings scans — no more empty files or spam                                                       |
-|  **Web dashboard**  | **v4.1+** — Stats, scans, domains, monitors, R2 browser, Targets, APK/IPA/ADB Auditors, MITM remote scan, CF-1016 findings. Unified findings table with per-module columns, inline expandable detail panels, severity/chip/multi-field filters            |
+|  **Web dashboard**  | **v4.1+** — Stats, scans, domains, monitors, R2 browser, Targets, APK/IPA/ADB Auditors, CF-1016 findings. Unified findings table with per-module columns, inline expandable detail panels, severity/chip/multi-field filters            |
 
 
 ---
@@ -215,23 +214,9 @@ The **APK Auditor** is a fully browser-based static analysis tool available at `
 - Regex presets and bulk pattern scans for secrets/tokens across code and resources
 - OWASP MASVS aligned reporting — one-click export
 
-**Remote Fetch by Package ID (server-side, with MITM patch):**
+> **Want to MITM an app's HTTPS traffic?** The auditor is static-analysis only — kept deliberately lightweight (all in-browser, no heavy server-side Java toolchain). To prepare an APK for interception, patch it locally with [apk-mitm](https://github.com/niklashigi/apk-mitm) (`npx apk-mitm app.apk`), install the patched build on your test device, then drop it back into the auditor if you want to analyze it.
 
-```bash
-# Via the dashboard UI — click "Fetch Package ID" in the APK Auditor page
-# Enter the package ID, optionally enable MITM patch, click Start
-```
-
-What happens:
-1. Downloads the APK from APKPure (supports `.xapk` / split APKs automatically)
-2. *(Optional)* Patches `network_security_config.xml` to trust user-installed CAs + disables certificate pinning
-3. Re-signs with `uber-apk-signer` and uploads the patched APK to R2
-4. Shows a **download panel** in the Auditor UI with direct R2 links for:
-   -  Original APK
-   -  MITM Patched APK (if requested)
-5. Automatically loads the APK into the browser auditor for analysis
-
-> **Scan records from APK Auditor are hidden from the main Scans dashboard** — they exist only within the Auditor context.
+> **The APK Auditor never creates records in the main Scans dashboard** — it runs in its own context.
 
 ### Mobile Application Analysis (IPA Auditor)
 

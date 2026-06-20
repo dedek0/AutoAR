@@ -296,6 +296,53 @@ input, select, textarea { font-family: inherit; }
   50% { opacity: 0.5; }
 }
 
+/* ── Security Lab expandable subnav ───────────────────────────────────────── */
+.nav-group-head { cursor: pointer; }
+
+.nav-caret {
+  margin-left: auto;
+  transition: transform var(--transition);
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.nav-group-head.expanded .nav-caret {
+  transform: rotate(90deg);
+}
+
+.nav-subitems {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 300ms ease;
+}
+
+.nav-group-head.expanded + .nav-subitems {
+  max-height: 400px;
+}
+
+.nav-subitem {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px 7px 44px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 6px;
+  margin: 1px 10px;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.nav-subitem:hover {
+  background: var(--bg-card);
+  color: var(--text-secondary);
+}
+
+.nav-subitem.active {
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim);
+}
+
 .sidebar-footer {
   padding: 12px 16px;
   border-top: 1px solid var(--border);

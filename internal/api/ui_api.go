@@ -63,7 +63,9 @@ func apiConfigHandler(c *gin.Context) {
 		"auth_provider":   "local",
 		"db_type":         utils.GetEnv("DB_TYPE", "postgresql"),
 		"mode":            utils.GetEnv("AUTOAR_MODE", "api"),
-		"monitor_webhook": os.Getenv("MONITOR_WEBHOOK_URL"),
+		// Secret webhook URL is never returned on this public endpoint — only
+		// whether one is configured (the raw value carries a Discord/Slack token).
+		"monitor_webhook_set": strings.TrimSpace(os.Getenv("MONITOR_WEBHOOK_URL")) != "",
 		"monitor_ai_available": strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" ||
 			strings.TrimSpace(os.Getenv("OPENCODE_API_KEY")) != "" ||
 			strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "",
@@ -1645,6 +1647,7 @@ func apiPostMonitorSubdomainTarget(c *gin.Context) {
 		IntervalSeconds int    `json:"interval_seconds"`
 		Threads         int    `json:"threads"`
 		CheckNew        *bool  `json:"check_new"`
+		MonitorJS       *bool  `json:"monitor_js"`
 		Start           *bool  `json:"start"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -1670,8 +1673,12 @@ func apiPostMonitorSubdomainTarget(c *gin.Context) {
 	if body.CheckNew != nil {
 		checkNew = *body.CheckNew
 	}
+	monitorJS := false
+	if body.MonitorJS != nil {
+		monitorJS = *body.MonitorJS
+	}
 
-	if err := db.AddSubdomainMonitorTarget(domain, interval, threads, checkNew); err != nil {
+	if err := db.AddSubdomainMonitorTarget(domain, interval, threads, checkNew, monitorJS); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1718,6 +1725,7 @@ func apiPostMonitorSubdomainTarget(c *gin.Context) {
 		"interval_seconds": interval,
 		"threads":          threads,
 		"check_new":        checkNew,
+		"monitor_js":       monitorJS,
 		"started":          start,
 	})
 }

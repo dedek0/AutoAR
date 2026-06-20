@@ -150,6 +150,24 @@ func InsertJSFile(domain, jsURL, contentHash string) error {
 	return database.InsertJSFile(domain, jsURL, contentHash)
 }
 
+// ListJSEndpoints returns all known JS-derived endpoints for a domain (for diffing).
+func ListJSEndpoints(domain string) ([]string, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return nil, err
+	}
+	return database.ListJSEndpoints(domain)
+}
+
+// InsertJSEndpoints records JS-derived endpoints for a domain (idempotent).
+func InsertJSEndpoints(domain string, endpoints []JSEndpoint) error {
+	database, err := getInitializedDB()
+	if err != nil {
+		return err
+	}
+	return database.InsertJSEndpoints(domain, endpoints)
+}
+
 // InsertKeyhackTemplate inserts or updates a KeyHack template
 func InsertKeyhackTemplate(keyname, commandTemplate, method, url, header, body, notes, description string) error {
 	database, err := getInitializedDB()
@@ -377,12 +395,12 @@ func ListSubdomainMonitorTargets() ([]SubdomainMonitorTarget, error) {
 }
 
 // AddSubdomainMonitorTarget adds a new subdomain monitoring target
-func AddSubdomainMonitorTarget(domain string, interval int, threads int, checkNew bool) error {
+func AddSubdomainMonitorTarget(domain string, interval int, threads int, checkNew, monitorJS bool) error {
 	database, err := getInitializedDB()
 	if err != nil {
 		return err
 	}
-	return database.AddSubdomainMonitorTarget(domain, interval, threads, checkNew)
+	return database.AddSubdomainMonitorTarget(domain, interval, threads, checkNew, monitorJS)
 }
 
 // RemoveSubdomainMonitorTarget removes a subdomain monitoring target by domain

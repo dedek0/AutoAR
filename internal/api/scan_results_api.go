@@ -2065,9 +2065,9 @@ func apiGetScanReport(c *gin.Context) {
 		target = scanRec.Target
 		scanType = scanRec.ScanType
 		status = scanRec.Status
-		if !scanRec.CompletedAt.IsZero() {
-			dateStr = scanRec.CompletedAt.UTC().Format("2006-01-02")
-		}
+	if scanRec.CompletedAt != nil && !scanRec.CompletedAt.IsZero() {
+		dateStr = scanRec.CompletedAt.UTC().Format("2006-01-02")
+	}
 	}
 
 	// Build a simple Markdown findings table from parsed results (top 50 rows).
