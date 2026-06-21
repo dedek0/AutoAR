@@ -35,3 +35,6 @@ Wordlists/
 *.sqlite
 *.sqlite3
 .DS_Store
+
+**/*:Zone.Identifier
+**/*Zone.Identifier
