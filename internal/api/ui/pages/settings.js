@@ -362,6 +362,8 @@
     const input = document.getElementById('monitor-webhook-input');
     if (!input) return;
     const webhook = input.value.trim();
+    // The raw webhook is no longer returned by /api/config (it's a secret), so the
+    // field renders empty; an empty submit means "no change" rather than clearing it.
     if (!webhook) {
       window.showToast('info', 'No change', 'Enter a webhook URL to set or replace the current one.');
       return;

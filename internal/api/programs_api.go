@@ -42,6 +42,7 @@ type ProgramSummary struct {
 	LatestTargetBrief     string       `json:"latest_target_brief"`      // brief context for the latest target
 	UpdatedAt             string       `json:"updated_at"`               // when we last fetched this
 	Stats                 ProgramStats `json:"stats"`
+	Assets                []string     `json:"-"`                        // all in-scope asset identifiers (internal, for scope-change monitoring)
 }
 
 // ProgramStats holds user-specific stats from H1.
@@ -53,6 +54,7 @@ type ProgramStats struct {
 
 type programScopeRequest struct {
 	Programs []programScopeRequestItem `json:"programs"`
+	Force    bool                      `json:"force"` // bypass the scope cache (manual Refresh)
 }
 
 type programScopeRequestItem struct {
@@ -270,11 +272,13 @@ func apiProgramScopeSummaries(c *gin.Context) {
 		}
 
 		cacheKey := programScopeCacheKey(item.Platform, item.Handle)
-		if summary, ok := getCachedProgramScope(cacheKey); ok {
-			mu.Lock()
-			summaries[cacheKey] = summary
-			mu.Unlock()
-			continue
+		if !req.Force {
+			if summary, ok := getCachedProgramScope(cacheKey); ok {
+				mu.Lock()
+				summaries[cacheKey] = summary
+				mu.Unlock()
+				continue
+			}
 		}
 
 		wg.Add(1)
@@ -288,8 +292,7 @@ func apiProgramScopeSummaries(c *gin.Context) {
 			switch item.Platform {
 			case "h1", "hackerone":
 				if h1Auth != "" {
-					summary = fetchH1ScopeSummary(item.Handle, h1Auth)
-					fetched = true
+					summary, fetched = fetchH1ScopeSummary(item.Handle, h1Auth)
 				}
 			case "bc", "bugcrowd":
 				if bcToken != "" {
@@ -300,8 +303,17 @@ func apiProgramScopeSummaries(c *gin.Context) {
 
 			summary.Platform = item.Platform
 			summary.Handle = item.Handle
+			// Only cache a successful fetch — caching a rate-limited/empty result would
+			// hide the program's real scope until the TTL expires.
 			if fetched {
 				setCachedProgramScope(cacheKey, summary)
+				// User-initiated force-fetch (Programs page search) → also feed the
+				// scope-update watch so a genuinely-newer-than-watermark program
+				// alerts Discord immediately, instead of waiting for the next
+				// warmer refresh that might re-rate-limit it.
+				if req.Force {
+					ProgramWatchCheckProgram(summary)
+				}
 			}
 			mu.Lock()
 			summaries[cacheKey] = summary
@@ -476,32 +488,66 @@ func enrichH1ScopeCounts(programs []ProgramSummary, auth string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			summary := fetchH1ScopeSummary(p.Handle, auth)
-			p.ScopeTargets = summary.ScopeTargets
-			p.LatestTarget = summary.LatestTarget
-			p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
-			p.LatestTargetBrief = summary.LatestTargetBrief
+			summary, ok := fetchH1ScopeSummary(p.Handle, auth)
+			if ok {
+				p.ScopeTargets = summary.ScopeTargets
+				p.LatestTarget = summary.LatestTarget
+				p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
+				p.LatestTargetBrief = summary.LatestTargetBrief
+			}
 		}(&programs[i])
 	}
 	wg.Wait()
 }
 
-func fetchH1ScopeSummary(handle, auth string) ProgramSummary {
+// fetchH1ScopeSummary returns the scope summary and an ok flag. ok is false when the
+// request fails or H1 returns a non-200 (e.g. 429 rate-limit / 403) — the caller must
+// NOT cache a !ok result, otherwise a transient failure would hide a program's real
+// scope (showing "—") for the whole cache TTL.
+//
+// 429s are retried with exponential backoff (honoring Retry-After when supplied) so
+// the warmer doesn't routinely leave hundreds of programs with stale empty scopes.
+func fetchH1ScopeSummary(handle, auth string) (ProgramSummary, bool) {
 	url := fmt.Sprintf("https://api.hackerone.com/v1/hackers/programs/%s/structured_scopes?page%%5Bsize%%5D=100", handle)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return ProgramSummary{}
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Basic "+auth)
-
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return ProgramSummary{}
+
+	var body []byte
+	var statusCode int
+	const maxAttempts = 3
+	backoff := 2 * time.Second
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return ProgramSummary{}, false
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Basic "+auth)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return ProgramSummary{}, false
+		}
+		body, _ = io.ReadAll(resp.Body)
+		statusCode = resp.StatusCode
+		// Honor an explicit Retry-After (seconds) if H1 sent one.
+		retryAfter := backoff
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 && secs < 30 {
+				retryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		resp.Body.Close()
+
+		if statusCode != http.StatusTooManyRequests || attempt == maxAttempts-1 {
+			break // 200 (success), 4xx that isn't 429 (auth/permission), or out of retries
+		}
+		time.Sleep(retryAfter)
+		backoff *= 2
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+
+	if statusCode != http.StatusOK {
+		return ProgramSummary{}, false
+	}
 
 	scopes := gjson.Get(string(body), "data")
 	summary := ProgramSummary{Platform: "h1", Handle: handle}
@@ -510,6 +556,9 @@ func fetchH1ScopeSummary(handle, auth string) ProgramSummary {
 		if attrs.Get("eligible_for_submission").Bool() {
 			summary.ScopeTargets++
 			target := attrs.Get("asset_identifier").Str
+			if target != "" {
+				summary.Assets = append(summary.Assets, target)
+			}
 			updatedAt := firstGJSONString(attrs, "updated_at", "created_at", "last_updated_at")
 			if target != "" && (summary.LatestTarget == "" || isNewerProgramTime(updatedAt, summary.LatestTargetUpdatedAt)) {
 				summary.LatestTarget = target
@@ -518,7 +567,7 @@ func fetchH1ScopeSummary(handle, auth string) ProgramSummary {
 			}
 		}
 	}
-	return summary
+	return summary, true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -703,6 +752,9 @@ func fetchBCScopeSummary(handle, programURL, token string) ProgramSummary {
 			scope.Get("targets").ForEach(func(_, t gjson.Result) bool {
 				summary.ScopeTargets++
 				target := firstGJSONString(t, "uri", "name", "target")
+				if target != "" {
+					summary.Assets = append(summary.Assets, target)
+				}
 				updatedAt := firstGJSONString(t, "updatedAt", "updated_at", "lastUpdatedAt", "createdAt", "created_at")
 				if target != "" && (summary.LatestTarget == "" || isNewerProgramTime(updatedAt, summary.LatestTargetUpdatedAt)) {
 					summary.LatestTarget = target
@@ -798,9 +850,17 @@ func fetchITPrograms(bbpOnly, includeScope bool) ([]ProgramSummary, error) {
 			if i := strings.Index(detail, "="); i >= 0 && i+1 < len(detail) {
 				programPath = detail[i+1:]
 			}
-			handle := programPath
-			if i := strings.LastIndex(strings.TrimRight(programPath, "/"), "/"); i >= 0 {
-				handle = strings.TrimRight(programPath, "/")[i+1:]
+			// Intigriti's webLinks.detail paths look like
+			//   ".../programs/<company>/<program-handle>/detail"
+			// — the LAST segment is the literal word "detail", not the handle.
+			// Strip a trailing "/detail" first, then take the last segment.
+			// (Without this every IT program gets handle="detail", which collides
+			// into a single program_assets bucket and floods the scope monitor.)
+			handlePath := strings.TrimRight(programPath, "/")
+			handlePath = strings.TrimSuffix(handlePath, "/detail")
+			handle := handlePath
+			if i := strings.LastIndex(handlePath, "/"); i >= 0 {
+				handle = handlePath[i+1:]
 			}
 			name := strings.TrimSpace(rec.Get("name").Str)
 			if name == "" {
@@ -904,6 +964,9 @@ func fetchITScopeSummary(client *http.Client, token, programID string) ProgramSu
 			}
 			summary.ScopeTargets++
 			target := strings.TrimSpace(v.Get("endpoint").Str)
+			if target != "" {
+				summary.Assets = append(summary.Assets, target)
+			}
 			if target != "" && summary.LatestTarget == "" {
 				summary.LatestTarget = target
 				summary.LatestTargetBrief = firstGJSONString(v, "description", "type.value")

@@ -250,11 +250,15 @@ function updateBadges(r) {
     }
 }
 
+// computeMitmReadiness assesses — purely from the static analysis already done in
+// the browser — whether the app can be prepped for HTTPS interception with
+// apk-mitm. No server-side toolchain (apktool/JRE) is involved; it just reads the
+// findings the engine produced (pinning, integrity checks, trust-all) + appInfo.
 function computeMitmReadiness(r) {
     const ids = new Set((r.findings || []).map(f => f.ruleId));
-    const pinning = ids.has('cert_pinning');
-    const antiTamper = ids.has('integrity_check');
-    const trustAll = ids.has('trust_all');
+    const pinning = ids.has('cert_pinning');       // CertificatePinner / pin-sha256 / PublicKeyPinning
+    const antiTamper = ids.has('integrity_check'); // SafetyNet / Play Integrity
+    const trustAll = ids.has('trust_all');         // app already accepts all certs
     const nsc = !!(r.appInfo && r.appInfo.networkSecurityConfig);
     const targetSdk = (r.appInfo && r.appInfo.targetSdk) || 0;
 
@@ -1395,20 +1399,8 @@ function setupExport() {
 }
 
 function setupTheme() {
-    const saved = localStorage.getItem('theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const theme = saved || (prefersDark ? 'dark' : 'light');
-    document.documentElement.dataset.theme = theme;
-
-    const btn = $('#themeToggle');
-    if (btn) {
-        btn.addEventListener('click', () => {
-            const current = document.documentElement.dataset.theme;
-            const next = current === 'dark' ? 'light' : 'dark';
-            document.documentElement.dataset.theme = next;
-            localStorage.setItem('theme', next);
-        });
-    }
+    document.documentElement.dataset.theme = 'dark';
+    localStorage.removeItem('theme');
 }
 
 function setupDragDrop() {

@@ -46,10 +46,21 @@
         setTimeout(() => {
           try { frame.src = auditorPathMap[view] || `/ui/apkauditor/?mode=${modeMap[view]}`; }
           catch (e) {
+            // Keep SPA navigation alive even if iframe init fails in a browser/extension edge case.
             console.warn('[router] auditor iframe init failed', e);
           }
         }, 30);
       }
+    }
+
+    // Reset group-head "contains the active view" markers; recomputed in the loop below.
+    document.querySelectorAll('.nav-group-head').forEach((h) => h.classList.remove('has-active-child'));
+
+    // Security Lab tool tabs (data-sltab) aren't views — clear their highlight whenever
+    // we leave the Security Lab view, so its dropdown never shows two active items
+    // (e.g. Keyhacks active + a stale tool still highlighted).
+    if (view !== 'securitylab') {
+      document.querySelectorAll('#securitylab-subnav .nav-subitem[data-sltab].active').forEach((x) => x.classList.remove('active'));
     }
 
     (window.VIEWS || []).forEach((v) => {
@@ -62,7 +73,20 @@
           el.style.display = isActive ? 'flex' : 'none';
         }
       }
-      if (nav) nav.classList.toggle('active', v === view);
+      if (nav) {
+        const navActive = v === view;
+        nav.classList.toggle('active', navActive);
+        // If the active view lives inside a collapsible group (Mobile / Asset Management),
+        // expand that group so the highlighted item is visible.
+        if (navActive && nav.classList.contains('nav-subitem')) {
+          const head = nav.closest('.nav-group')?.querySelector('.nav-group-head');
+          if (head) {
+            head.classList.add('expanded');
+            head.setAttribute('aria-expanded', 'true');
+            head.classList.add('has-active-child'); // surfaces active state when collapsed
+          }
+        }
+      }
     });
 
     document.getElementById('topbar-title').textContent = window.viewTitle(view);

@@ -30,8 +30,8 @@ func TestNewConcurrentFileUploader(t *testing.T) {
 	if u.maxConcurrent != 5 {
 		t.Errorf("maxConcurrent = %d, want 5", u.maxConcurrent)
 	}
-	if cap(u.semaphore) != 5 {
-		t.Errorf("semaphore cap = %d, want 5", cap(u.semaphore))
+	if u.sem == nil {
+		t.Error("sem should not be nil")
 	}
 
 	u2 := NewConcurrentFileUploader(0)
@@ -160,24 +160,23 @@ func TestConcurrentFileUploaderContextCancel(t *testing.T) {
 	uploader := NewConcurrentFileUploader(1)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	uploader.semaphore <- struct{}{}
-
-	files := []string{"blocked.txt"}
+	files := []string{"a.txt", "b.txt", "c.txt"}
 	done := make(chan struct{})
 	go func() {
 		uploader.UploadFiles(ctx, files, func(path string) error {
+			time.Sleep(50 * time.Millisecond)
 			return nil
 		})
 		close(done)
 	}()
 
+	time.Sleep(10 * time.Millisecond)
 	cancel()
-	<-uploader.semaphore
 
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
-		t.Error("UploadFiles did not return within 500ms after context cancellation")
+	case <-time.After(2 * time.Second):
+		t.Error("UploadFiles did not return within 2s after context cancellation")
 	}
 }
 

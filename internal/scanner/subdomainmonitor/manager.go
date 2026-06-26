@@ -8,9 +8,9 @@ import (
 
 // ManagerOptions contains options for managing subdomain monitoring targets
 type ManagerOptions struct {
-	Action    string // "add", "remove", "list", "start", "stop"
-	Domain    string
-	ID        int
+	Action   string // "add", "remove", "list", "start", "stop"
+	Domain   string
+	ID       int
 	Interval  int
 	Threads   int
 	CheckNew  bool

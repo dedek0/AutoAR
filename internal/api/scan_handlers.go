@@ -496,7 +496,6 @@ func scanFFuf(c *gin.Context) {
 		return
 	}
 
-	// Accept both 'target' and 'url' fields from the frontend.
 	var target string
 	if req.Target != nil && *req.Target != "" {
 		target = *req.Target

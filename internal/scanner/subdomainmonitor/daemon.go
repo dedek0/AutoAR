@@ -155,7 +155,7 @@ func checkAllRunningTargets() {
 				Domain:           t.Domain,
 				Threads:          t.Threads,
 				CheckNew:         t.CheckNew,
-				Reenumerate:      t.CheckNew,
+				Reenumerate:      t.CheckNew, // "detect new subs" also drives passive re-enumeration
 				MonitorJS:        t.MonitorJS,
 				SuppressBaseline: isBaseline,
 				Notify:           true,

@@ -351,7 +351,10 @@
         </div>
       </div>
       <div class="card">
-        <div class="k">Generated Payloads</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px">
+          <div class="k" style="margin:0">Generated Payloads</div>
+          <button class="copy-bulk-btn" id="ssrfCopyAll">Copy All</button>
+        </div>
         <div id="ssrfResults" class="list" style="max-height: 500px;"></div>
       </div>
     </section>
@@ -502,6 +505,23 @@
         $('panel-' + btn.dataset.tab).classList.add('active');
       });
     });
+
+    // Deep-linking: the parent dashboard can open a specific tool either via the URL
+    // hash on first load (#ssrf) or via postMessage once the iframe is already loaded.
+    // We click the tab button so any lazy initialization (e.g. XSS) also runs.
+    (function () {
+      function openTab(name) {
+        if (!name) return;
+        const btn = document.querySelector('.tab[data-tab="' + name + '"]');
+        if (btn) btn.click();
+      }
+      openTab((location.hash || '').replace(/^#/, ''));
+      window.addEventListener('hashchange', () => openTab((location.hash || '').replace(/^#/, '')));
+      window.addEventListener('message', (e) => {
+        const d = e.data;
+        if (d && d.type === 'securitylab-tab' && typeof d.tab === 'string') openTab(d.tab);
+      });
+    })();
 
     function pretty(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
     function b64urlDecode(str) {
@@ -1308,6 +1328,43 @@
     });
 
     // SSRF Logic
+    // Robust clipboard copy that also works over plain HTTP (the Clipboard API is
+    // only available in secure contexts, so the dashboard needs an execCommand fallback).
+    function ssrfCopyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.top = '-1000px';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          ok ? resolve() : reject(new Error('copy command rejected'));
+        } catch (e) { reject(e); }
+      });
+    }
+
+    function ssrfFlashBtn(btn, msg, restore) {
+      if (!btn) return;
+      btn.textContent = msg;
+      setTimeout(() => { btn.textContent = restore; }, 1600);
+    }
+
+    // Filtered render state, kept so Copy All / Copy group operate on exactly what's shown.
+    let ssrfFilteredUrls = [];
+    let ssrfGroups = [];
+
+    function ssrfCopyAllLabel() {
+      return ssrfFilteredUrls.length ? `Copy All (${ssrfFilteredUrls.length})` : 'Copy All';
+    }
+
     function renderSSRF() {
       const allowed = $('ssrfAllowed').value || 'reservation.walibi.nl';
       const attacker = $('ssrfAttacker').value || 'evil.com';
@@ -1321,12 +1378,13 @@
       }
 
       let html = '';
-      let count = 0;
+      ssrfFilteredUrls = [];
+      ssrfGroups = [];
 
       window.SSRF_PAYLOADS.forEach(group => {
         let groupHtml = '';
-        let groupCount = 0;
-        
+        const groupUrls = [];
+
         (group.payloads || []).forEach(p => {
           if (filter) {
             const desc = (p.description || '').toLowerCase();
@@ -1334,37 +1392,189 @@
             if (!desc.includes(filter) && !tags.includes(filter)) return;
           }
 
-          let pl = p.payload || '';
-          pl = pl.replace(/<allowed>/g, allowed).replace(/<attacker>/g, attacker);
-          
-          let fullUrl = (p.prefix || '') + pl + (p.suffix || '');
-          let displayUrl = escapeHTML(fullUrl);
-          
+          let pl = (p.payload || '').replace(/<allowed>/g, allowed).replace(/<attacker>/g, attacker);
+          const fullUrl = (p.prefix || '') + pl + (p.suffix || '');
+          const idx = ssrfFilteredUrls.length;
+          ssrfFilteredUrls.push(fullUrl);
+          groupUrls.push(fullUrl);
+
+          // data-i indexes ssrfFilteredUrls; copy is handled by delegation below so we
+          // never inline-escape payloads (which broke on quotes / backslashes / newlines).
           groupHtml += `<div class="item" style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
             <div style="word-break: break-all;">
-              <code style="color:var(--text); font-size:14px; display:block; margin-bottom:4px">${displayUrl}</code>
+              <code style="color:var(--text); font-size:14px; display:block; margin-bottom:4px">${escapeHTML(fullUrl)}</code>
               <span class="muted" style="font-size:11px">${escapeHTML(p.description || 'No description')}</span>
             </div>
-            <button class="btn ghost" style="padding:4px 8px; font-size:11px" onclick="navigator.clipboard.writeText('${escapeHTML(fullUrl).replace(/'/g, "\\'")}')">Copy</button>
+            <button class="btn ghost ssrf-copy-one" data-i="${idx}" style="padding:4px 8px; font-size:11px; flex-shrink:0">Copy</button>
           </div>`;
-          groupCount++;
-          count++;
         });
 
-        if (groupCount > 0) {
-          html += `<div style="padding: 8px; background: rgba(123,139,255,.05); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;">
-            <b style="color:var(--accent)">${escapeHTML(group.name)}</b> <span class="muted">(${groupCount})</span>
+        if (groupUrls.length) {
+          const gi = ssrfGroups.length;
+          ssrfGroups.push({ name: group.name, urls: groupUrls });
+          html += `<div style="padding: 8px; background: rgba(123,139,255,.05); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+            <span><b style="color:var(--accent)">${escapeHTML(group.name)}</b> <span class="muted">(${groupUrls.length})</span></span>
+            <button class="btn ghost ssrf-copy-group" data-g="${gi}" style="padding:3px 8px; font-size:10px; flex-shrink:0">Copy group</button>
           </div>` + groupHtml;
         }
       });
 
       resultsEl.innerHTML = html || '<div class="item muted">No payloads found.</div>';
-      statsEl.textContent = `${count} payload(s) generated.`;
+      statsEl.textContent = `${ssrfFilteredUrls.length} payload(s) generated.`;
+      $('ssrfCopyAll').textContent = ssrfCopyAllLabel();
     }
+
+    // Single delegated handler for per-payload and per-group copy (survives re-renders).
+    $('ssrfResults').addEventListener('click', (e) => {
+      const one = e.target.closest('.ssrf-copy-one');
+      if (one) {
+        const url = ssrfFilteredUrls[+one.dataset.i];
+        if (url != null) ssrfCopyText(url).then(() => ssrfFlashBtn(one, 'Copied', 'Copy'));
+        return;
+      }
+      const grp = e.target.closest('.ssrf-copy-group');
+      if (grp) {
+        const urls = (ssrfGroups[+grp.dataset.g] || {}).urls || [];
+        if (urls.length) ssrfCopyText(urls.join('\n')).then(() => ssrfFlashBtn(grp, `Copied ${urls.length}`, 'Copy group'));
+      }
+    });
+
+    $('ssrfCopyAll').addEventListener('click', function () {
+      if (!ssrfFilteredUrls.length) return;
+      ssrfCopyText(ssrfFilteredUrls.join('\n')).then(() => {
+        this.textContent = `Copied ${ssrfFilteredUrls.length}!`;
+        setTimeout(() => { this.textContent = ssrfCopyAllLabel(); }, 1800);
+      });
+    });
 
     $('ssrfGenerate').addEventListener('click', renderSSRF);
     $('ssrfFilter').addEventListener('input', renderSSRF);
     if (window.SSRF_PAYLOADS) renderSSRF();
+
+    // ─────────────────────────────────────────────
+    //  Recon Dorks (client-side search-engine dork generator)
+    // ─────────────────────────────────────────────
+    (function () {
+      if (!window.DORKS_DB) return;
+      const DORKS = window.DORKS_DB;
+      const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+      const SEV_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info / Recon' };
+      const BADGE_CLASS = { google: 'bg-google', github: 'bg-github', shodan: 'bg-shodan', wayback: 'bg-wayback', crtsh: 'bg-crtsh', censys: 'bg-censys', urlscan: 'bg-urlscan', fofa: 'bg-fofa', grep: 'bg-grep', intx: 'bg-intx' };
+
+      let target = 'example.com';
+      let filterText = '';
+      const activeSevs = new Set(SEV_ORDER);
+      let visibleQueries = [];
+
+      function sanitize(raw) {
+        if (!raw) return 'example.com';
+        return raw.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/[^a-zA-Z0-9.\-_]/g, '') || 'example.com';
+      }
+      // google queries become a Google search URL; every other platform's query is already a full URL.
+      function buildUrl(d, t) {
+        const q = d.query.replace(/\{T\}/g, t);
+        if ((d.platforms || []).includes('google') && !/^https?:/i.test(q)) {
+          return 'https://www.google.com/search?q=' + encodeURIComponent(q);
+        }
+        return q;
+      }
+      function copyAllLabel() { return visibleQueries.length ? `Copy All (${visibleQueries.length})` : 'Copy All'; }
+
+      function renderQuick(t) {
+        const e = encodeURIComponent(t);
+        $('dorkQuick').innerHTML = [
+          ['🔍 Google site:', `https://www.google.com/search?q=site%3A${e}`],
+          ['🐙 GitHub Code', `https://github.com/search?q=%22${e}%22&type=code`],
+          ['🛰️ Shodan', `https://www.shodan.io/search?query=hostname%3A%22${e}%22`],
+          ['📜 crt.sh', `https://crt.sh/?q=%25.${e}`],
+          ['🔭 URLScan', `https://urlscan.io/search/#domain%3A${e}`],
+          ['🏛️ Wayback', `https://web.archive.org/cdx/search/cdx?url=*.${e}/*&output=text&fl=original&collapse=urlkey`],
+          ['🔬 Censys', `https://search.censys.io/search?resource=hosts&q=dns.names%3A${e}`],
+          ['🛡️ Sec Headers', `https://securityheaders.com/?q=${e}&followRedirects=on`],
+          ['🕶️ IntelX', `https://intelx.io/?s=${e}`],
+          ['🐞 OpenBugBounty', `https://www.openbugbounty.org/search/?search=${e}`],
+          ['📄 PublicWWW', `https://publicwww.com/websites/%22${e}%22/`],
+        ].map(([label, url]) => `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${label}</a>`).join('');
+      }
+
+      function render() {
+        const c = $('dorkResults');
+        const ft = filterText.toLowerCase();
+        let html = '';
+        let total = 0;
+        visibleQueries = [];
+        for (const sev of SEV_ORDER) {
+          if (!activeSevs.has(sev)) continue;
+          const list = (DORKS[sev] || []).filter(d => !ft || d.title.toLowerCase().includes(ft) || d.query.toLowerCase().includes(ft));
+          if (!list.length) continue;
+          total += list.length;
+          html += `<div class="dork-sec-head"><span class="dork-dot dot-${sev}"></span><h3 class="sev-${sev}">${SEV_LABEL[sev]}</h3><span class="dork-sec-count">${list.length} dork${list.length !== 1 ? 's' : ''}</span></div><div class="dork-grid">`;
+          for (const d of list) {
+            const q = d.query.replace(/\{T\}/g, target);
+            const url = buildUrl(d, target);
+            const idx = visibleQueries.length;
+            visibleQueries.push(q);
+            const badges = (d.platforms || []).map(p => `<span class="dork-badge ${BADGE_CLASS[p] || 'bg-google'}">${escapeHTML(p)}</span>`).join(' ');
+            html += `<a href="${escapeHTML(url)}" target="_blank" rel="noopener" class="dork-card">
+              <div class="dt"><span>${escapeHTML(d.icon || '🔎')}</span>${escapeHTML(d.title)}</div>
+              <div class="dq">${escapeHTML(q)}</div>
+              <div class="df"><span>${badges}</span><button class="dork-copy" data-i="${idx}">copy</button></div>
+            </a>`;
+          }
+          html += `</div>`;
+        }
+        c.innerHTML = html || '<div class="item muted">No dorks match the current filter.</div>';
+        $('dorkStats').textContent = `${total} dork(s) for ${target}`;
+        $('dorkCopyAll').textContent = copyAllLabel();
+      }
+
+      function applyTarget() {
+        target = sanitize($('dorkTarget').value);
+        $('dorkTarget').value = target;
+        render();
+        renderQuick(target);
+      }
+
+      $('dorkApply').addEventListener('click', applyTarget);
+      $('dorkTarget').addEventListener('keypress', e => { if (e.key === 'Enter') applyTarget(); });
+      $('dorkFilter').addEventListener('input', e => { filterText = e.target.value.trim(); render(); });
+
+      $('dorkSevFilter').querySelectorAll('.dork-sev-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const s = btn.dataset.sev;
+          if (s === 'all') {
+            const allOn = activeSevs.size === SEV_ORDER.length;
+            SEV_ORDER.forEach(x => { if (allOn) activeSevs.delete(x); else activeSevs.add(x); });
+          } else if (activeSevs.has(s)) { activeSevs.delete(s); } else { activeSevs.add(s); }
+          $('dorkSevFilter').querySelectorAll('.dork-sev-btn').forEach(b => {
+            const bs = b.dataset.sev;
+            b.classList.toggle('active', bs === 'all' ? activeSevs.size === SEV_ORDER.length : activeSevs.has(bs));
+          });
+          render();
+        });
+      });
+
+      // Per-card copy (delegated; prevents the card link from opening).
+      $('dorkResults').addEventListener('click', e => {
+        const btn = e.target.closest('.dork-copy');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const q = visibleQueries[+btn.dataset.i];
+        if (q != null) ssrfCopyText(q).then(() => ssrfFlashBtn(btn, '✓', 'copy'));
+      });
+
+      $('dorkCopyAll').addEventListener('click', function () {
+        if (!visibleQueries.length) return;
+        ssrfCopyText(visibleQueries.join('\n')).then(() => {
+          this.textContent = `Copied ${visibleQueries.length}!`;
+          setTimeout(() => { this.textContent = copyAllLabel(); }, 1800);
+        });
+      });
+
+      render();
+      renderQuick(target);
+    })();
 
     // ─────────────────────────────────────────────
     //  XSS Cheat Sheet
@@ -1563,134 +1773,6 @@
     });
     // Pre-init on load
     if (window.XSS_PAYLOADS) initXSS();
-
-    // ─────────────────────────────────────────────
-    //  Recon Dorks (client-side search-engine dork generator)
-    // ─────────────────────────────────────────────
-    (function () {
-      if (!window.DORKS_DB) return;
-      const DORKS = window.DORKS_DB;
-      const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
-      const SEV_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info / Recon' };
-      const BADGE_CLASS = { google: 'bg-google', github: 'bg-github', shodan: 'bg-shodan', wayback: 'bg-wayback', crtsh: 'bg-crtsh', censys: 'bg-censys', urlscan: 'bg-urlscan', fofa: 'bg-fofa', grep: 'bg-grep', intx: 'bg-intx' };
-
-      let target = 'example.com';
-      let filterText = '';
-      const activeSevs = new Set(SEV_ORDER);
-      let visibleQueries = [];
-
-      function sanitize(raw) {
-        if (!raw) return 'example.com';
-        return raw.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/[^a-zA-Z0-9.\-_]/g, '') || 'example.com';
-      }
-      function buildUrl(d, t) {
-        const q = d.query.replace(/\{T\}/g, t);
-        if ((d.platforms || []).includes('google') && !/^https?:/i.test(q)) {
-          return 'https://www.google.com/search?q=' + encodeURIComponent(q);
-        }
-        return q;
-      }
-      function copyAllLabel() { return visibleQueries.length ? `Copy All (${visibleQueries.length})` : 'Copy All'; }
-
-      function renderQuick(t) {
-        const e = encodeURIComponent(t);
-        $('dorkQuick').innerHTML = [
-          ['🔍 Google site:', `https://www.google.com/search?q=site%3A${e}`],
-          ['🐙 GitHub Code', `https://github.com/search?q=%22${e}%22&type=code`],
-          ['🛰️ Shodan', `https://www.shodan.io/search?query=hostname%3A%22${e}%22`],
-          ['📜 crt.sh', `https://crt.sh/?q=%25.${e}`],
-          ['🔭 URLScan', `https://urlscan.io/search/#domain%3A${e}`],
-          ['🏛️ Wayback', `https://web.archive.org/cdx/search/cdx?url=*.${e}/*&output=text&fl=original&collapse=urlkey`],
-          ['🔬 Censys', `https://search.censys.io/search?resource=hosts&q=dns.names%3A${e}`],
-          ['🛡️ Sec Headers', `https://securityheaders.com/?q=${e}&followRedirects=on`],
-          ['🕶️ IntelX', `https://intelx.io/?s=${e}`],
-          ['🐞 OpenBugBounty', `https://www.openbugbounty.org/search/?search=${e}`],
-          ['📄 PublicWWW', `https://publicwww.com/websites/%22${e}%22/`],
-        ].map(([label, url]) => `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${label}</a>`).join('');
-      }
-
-      function render() {
-        const c = $('dorkResults');
-        const ft = filterText.toLowerCase();
-        let html = '';
-        let total = 0;
-        visibleQueries = [];
-        for (const sev of SEV_ORDER) {
-          if (!activeSevs.has(sev)) continue;
-          const list = (DORKS[sev] || []).filter(d => !ft || d.title.toLowerCase().includes(ft) || d.query.toLowerCase().includes(ft));
-          if (!list.length) continue;
-          total += list.length;
-          html += `<div class="dork-sec-head"><span class="dork-dot dot-${sev}"></span><h3 class="sev-${sev}">${SEV_LABEL[sev]}</h3><span class="dork-sec-count">${list.length} dork${list.length !== 1 ? 's' : ''}</span></div><div class="dork-grid">`;
-          for (const d of list) {
-            const q = d.query.replace(/\{T\}/g, target);
-            const url = buildUrl(d, target);
-            const idx = visibleQueries.length;
-            visibleQueries.push(q);
-            const badges = (d.platforms || []).map(p => `<span class="dork-badge ${BADGE_CLASS[p] || 'bg-google'}">${escapeHTML(p)}</span>`).join(' ');
-            html += `<a href="${escapeHTML(url)}" target="_blank" rel="noopener" class="dork-card">
-              <div class="dt"><span>${escapeHTML(d.icon || '🔎')}</span>${escapeHTML(d.title)}</div>
-              <div class="dq">${escapeHTML(q)}</div>
-              <div class="df"><span>${badges}</span><button class="dork-copy" data-i="${idx}">copy</button></div>
-            </a>`;
-          }
-          html += `</div>`;
-        }
-        c.innerHTML = html || '<div class="item muted">No dorks match the current filter.</div>';
-        $('dorkStats').textContent = `${total} dork(s) for ${target}`;
-        $('dorkCopyAll').textContent = copyAllLabel();
-      }
-
-      function applyTarget() {
-        target = sanitize($('dorkTarget').value);
-        $('dorkTarget').value = target;
-        render();
-        renderQuick(target);
-      }
-
-      $('dorkApply').addEventListener('click', applyTarget);
-      $('dorkTarget').addEventListener('keypress', e => { if (e.key === 'Enter') applyTarget(); });
-      $('dorkFilter').addEventListener('input', e => { filterText = e.target.value.trim(); render(); });
-
-      $('dorkSevFilter').querySelectorAll('.dork-sev-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const s = btn.dataset.sev;
-          if (s === 'all') {
-            const allOn = activeSevs.size === SEV_ORDER.length;
-            SEV_ORDER.forEach(x => { if (allOn) activeSevs.delete(x); else activeSevs.add(x); });
-          } else if (activeSevs.has(s)) { activeSevs.delete(s); } else { activeSevs.add(s); }
-          $('dorkSevFilter').querySelectorAll('.dork-sev-btn').forEach(b => {
-            const bs = b.dataset.sev;
-            b.classList.toggle('active', bs === 'all' ? activeSevs.size === SEV_ORDER.length : activeSevs.has(bs));
-          });
-          render();
-        });
-      });
-
-      // Per-card copy (delegated; prevents the card link from opening).
-      $('dorkResults').addEventListener('click', e => {
-        const btn = e.target.closest('.dork-copy');
-        if (!btn) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const q = visibleQueries[+btn.dataset.i];
-        if (q != null) {
-          navigator.clipboard.writeText(q).then(() => {
-            btn.textContent = '✓';
-            setTimeout(() => { btn.textContent = 'copy'; }, 1500);
-          });
-        }
-      });
-
-      $('dorkCopyAll').addEventListener('click', function () {
-        if (!visibleQueries.length) return;
-        navigator.clipboard.writeText(visibleQueries.join('\n')).then(() => {
-          this.textContent = `Copied ${visibleQueries.length}!`;
-          setTimeout(() => { this.textContent = copyAllLabel(); }, 1800);
-        });
-      });
-
-      applyTarget();
-    })();
   </script>
   <script src="takeover-reference.js"></script>
 </body>

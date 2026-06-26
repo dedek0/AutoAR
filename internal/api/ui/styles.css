@@ -32,7 +32,7 @@
   /* Text */
   --text-primary: #f1f5f9;
   --text-secondary: #94a3b8;
-  --text-muted: #475569;
+  --text-muted: #7d8da3; /* lightened for WCAG AA (~5.5:1 on the dark bg) */
   --text-accent: #06b6d4;
 
   /* Sidebar */
@@ -275,6 +275,65 @@ input, select, textarea { font-family: inherit; }
   flex-shrink: 0;
 }
 
+/* Expandable nav groups (Asset Management, Mobile, Security Lab) */
+.nav-caret {
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: transform 0.18s ease, opacity var(--transition);
+}
+.nav-group-head:hover .nav-caret { opacity: 0.9; }
+.nav-group-head.expanded .nav-caret { transform: rotate(90deg); opacity: 0.9; }
+.nav-subitems {
+  max-height: 0;
+  overflow: hidden;
+  visibility: hidden; /* collapsed sub-items leave the tab order / a11y tree */
+  transition: max-height 0.22s ease, visibility 0.22s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-group-head.expanded + .nav-subitems { max-height: 340px; visibility: visible; padding: 2px 0; }
+.nav-subitem {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px 7px 40px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  position: relative;
+  transition: all var(--transition);
+}
+.nav-subitem::before {
+  content: '';
+  position: absolute;
+  left: 26px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  transform: translateY(-50%);
+}
+.nav-subitem:hover { background: var(--bg-card); color: var(--text-primary); }
+.nav-subitem.active { color: var(--accent-cyan); background: var(--accent-cyan-dim); }
+.nav-subitem.active::before { opacity: 1; }
+/* Collapsed (icon-only) sidebar: hide the caret and submenus. Grouped views stay
+   reachable because clicking a group icon while collapsed expands the sidebar first
+   (handled in shell-wiring.js), rather than relying on a flyout that the sidebar's
+   overflow:hidden would clip. */
+.sidebar.collapsed .nav-caret,
+.sidebar.collapsed .nav-subitems { display: none; }
+/* When collapsed, the active sub-item is hidden, so highlight its group icon instead. */
+.sidebar.collapsed .nav-group-head.has-active-child {
+  background: var(--accent-cyan-dim);
+  color: var(--accent-cyan);
+}
+
 .nav-badge {
   margin-left: auto;
   background: var(--accent-cyan-dim);
@@ -294,53 +353,6 @@ input, select, textarea { font-family: inherit; }
 @keyframes badgePulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
-}
-
-/* ── Security Lab expandable subnav ───────────────────────────────────────── */
-.nav-group-head { cursor: pointer; }
-
-.nav-caret {
-  margin-left: auto;
-  transition: transform var(--transition);
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.nav-group-head.expanded .nav-caret {
-  transform: rotate(90deg);
-}
-
-.nav-subitems {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 300ms ease;
-}
-
-.nav-group-head.expanded + .nav-subitems {
-  max-height: 400px;
-}
-
-.nav-subitem {
-  display: flex;
-  align-items: center;
-  padding: 7px 10px 7px 44px;
-  font-size: 12px;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: 6px;
-  margin: 1px 10px;
-  transition: all var(--transition);
-  white-space: nowrap;
-}
-
-.nav-subitem:hover {
-  background: var(--bg-card);
-  color: var(--text-secondary);
-}
-
-.nav-subitem.active {
-  color: var(--accent-cyan);
-  background: var(--accent-cyan-dim);
 }
 
 .sidebar-footer {
@@ -866,6 +878,8 @@ input, select, textarea { font-family: inherit; }
 .change-dot.became_dead { color: var(--text-muted); background: var(--text-muted); box-shadow: none; }
 .change-dot.content_changed { color: var(--accent-amber); background: var(--accent-amber); }
 .change-dot.status_changed { color: var(--accent-purple); background: var(--accent-purple); }
+.change-dot.new_js_endpoint { color: var(--accent-pink, #ec4899); background: var(--accent-pink, #ec4899); }
+.change-dot.new_program_asset { color: var(--accent-emerald); background: var(--accent-emerald); }
 
 .change-body { flex: 1; min-width: 0; }
 
@@ -2025,6 +2039,19 @@ input, select, textarea { font-family: inherit; }
   background: var(--accent-cyan-dim);
 }
 
+/* Small button variant (report-template actions + table pagination) */
+.btn-sm { padding: 6px 12px; font-size: 12px; gap: 4px; }
+.btn:disabled,
+.btn-sm:disabled,
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+
+/* Visible keyboard focus ring for the sidebar nav (items are divs, not buttons) */
+.nav-item:focus-visible,
+.nav-subitem:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: -2px;
+}
+
 .scan-actions {
   margin-top: 10px;
 }
@@ -2123,12 +2150,24 @@ input, select, textarea { font-family: inherit; }
 
 .toast.success { border-left: 3px solid var(--accent-emerald); }
 .toast.error { border-left: 3px solid var(--accent-red); }
+.toast.warning { border-left: 3px solid var(--accent-amber); }
 .toast.info { border-left: 3px solid var(--accent-cyan); }
 
 .toast-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
 .toast-body { flex: 1; }
 .toast-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .toast-msg { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.toast-close:hover { color: var(--text-primary); }
 
 /* ── Responsive ─────────────────────────────────────────────────────────────── */
 
@@ -3843,148 +3882,4 @@ select.input {
 .timeout-field span {
   font-size: 11px;
   color: var(--text-muted);
-}
-
-/* ══════════════════════════════════════════════════════════════════════════════
-   Mobile Responsiveness — Fix horizontal overflow, fixed widths, and layouts
-   ══════════════════════════════════════════════════════════════════════════════ */
-
-/* Prevent any element from causing horizontal scroll on mobile */
-.shell { overflow-x: hidden; }
-.content { overflow-x: hidden; max-width: 100%; }
-
-/* Settings control: fixed 450px → responsive */
-.settings-control {
-  width: 100%;
-  max-width: 450px;
-  flex-wrap: wrap;
-}
-
-/* Launcher and scans toolbar fields: flex-basis 260px → min-width safe */
-.launcher-field-target,
-.scans-toolbar-search {
-  flex: 1 1 0;
-  min-width: 140px;
-}
-
-.launcher-field-type,
-.launcher-field-mode {
-  flex: 0 1 180px;
-  min-width: 120px;
-}
-
-/* Settings timeout grid: 2-col → 1-col on narrow */
-@media (max-width: 768px) {
-  .settings-timeout-grid {
-    grid-template-columns: 1fr;
-    padding: 16px;
-  }
-
-  .settings-control {
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .settings-control > * {
-    width: 100%;
-  }
-}
-
-/* ── Tables: horizontal scroll on small screens ─────────────────────────── */
-.content table,
-.result-table-wrap {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-/* ── Forms and inputs: prevent overflow ─────────────────────────────────── */
-.content input[type="text"],
-.content input[type="password"],
-.content input[type="email"],
-.content input[type="number"],
-.content select,
-.content textarea {
-  max-width: 100%;
-  box-sizing: border-box;
-}
-
-/* ── Modals: constrain to viewport ──────────────────────────────────────── */
-.modal,
-.modal-overlay,
-.modal-content,
-.modal-body,
-.modal-dialog {
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 32px);
-  overflow: auto;
-}
-
-/* ── Scan detail and ASM panels ─────────────────────────────────────────── */
-.scan-asm-layout,
-.scan-detail-header,
-.scan-detail-content {
-  overflow-x: hidden;
-  max-width: 100%;
-}
-
-/* ── Cards and stat grids: responsive columns ───────────────────────────── */
-@media (max-width: 900px) {
-  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-  .findings-grid { grid-template-columns: 1fr; }
-  .settings-timeout-grid { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 600px) {
-  .stats-grid { grid-template-columns: 1fr; }
-  .nav-grid { grid-template-columns: 1fr; }
-  .r2-browser { grid-template-columns: 1fr; }
-
-  /* Launcher fields stack vertically */
-  .launcher-field {
-    flex-direction: column;
-    gap: 8px;
-  }
-  .launcher-field-type,
-  .launcher-field-mode,
-  .launcher-field-target,
-  .launcher-field-action {
-    flex-basis: 100%;
-    min-width: 0;
-  }
-
-  /* Scan toolbar wraps */
-  .scans-toolbar {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .scans-toolbar-search {
-    flex-basis: 100%;
-    min-width: 0;
-  }
-
-  /* Reduce padding on content */
-  .content { padding: 12px; }
-}
-
-/* ── Auth gate: responsive on tiny screens ──────────────────────────────── */
-@media (max-width: 400px) {
-  .auth-card {
-    padding: 20px 16px;
-    width: 100%;
-    max-width: 100%;
-    border-radius: 8px;
-  }
-}
-
-/* ── Keyhacks table: prevent overflow ───────────────────────────────────── */
-.keyhack-table-wrap {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-/* ── Program list / findings rows ───────────────────────────────────────── */
-.programs-list,
-.findings-table-wrap {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
 }

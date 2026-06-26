@@ -596,6 +596,9 @@ func SetupAPI() *gin.Engine {
 		apiGroup.GET("/scope/platforms", apiScopePlatforms)
 		apiGroup.GET("/scope/programs", apiListPrograms)
 		apiGroup.POST("/scope/program-summaries", apiProgramScopeSummaries)
+		apiGroup.GET("/scope/watch-status", apiProgramWatchStatus)
+		apiGroup.POST("/scope/watch-test", apiProgramWatchTest)
+		apiGroup.GET("/scope/debug", apiProgramScopeDebug)
 		// AI finding validation & reporting
 		apiGroup.POST("/findings/validate", apiValidateFinding)
 		apiGroup.POST("/findings/report", apiReportFinding)

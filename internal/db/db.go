@@ -168,6 +168,57 @@ func InsertJSEndpoints(domain string, endpoints []JSEndpoint) error {
 	return database.InsertJSEndpoints(domain, endpoints)
 }
 
+// ListProgramScopeAssets returns the stored in-scope assets for a program (key = "platform:handle").
+func ListProgramScopeAssets(programKey string) ([]string, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return nil, err
+	}
+	return database.ListProgramScopeAssets(programKey)
+}
+
+// RecordProgramScopeAssets stores the current asset set for a program and returns the
+// newly-seen assets. firstRun is true when the program had no stored assets yet — in
+// that case the assets are baselined silently and newAssets is empty (no alert).
+func RecordProgramScopeAssets(programKey string, assets []string) ([]string, bool, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return nil, false, err
+	}
+	return database.RecordProgramScopeAssets(programKey, assets)
+}
+
+// DeleteProgramScopeAssetsByKey removes every asset row stored under the given key.
+// Used at boot to clean rows poisoned by past identifier-collision bugs (e.g. all
+// Intigriti programs ending up under "it:detail").
+func DeleteProgramScopeAssetsByKey(programKey string) (int64, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return 0, err
+	}
+	return database.DeleteProgramScopeAssetsByKey(programKey)
+}
+
+// TruncateProgramScopeAssets wipes every program_assets row. Used by the one-shot
+// program-monitor reset so all programs re-baseline silently after a known-bad build.
+func TruncateProgramScopeAssets() (int64, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return 0, err
+	}
+	return database.TruncateProgramScopeAssets()
+}
+
+// DeleteMonitorChangesByType clears monitor_changes rows of the given change type.
+// Used to scrub the historical flood of false "new_program_asset" entries.
+func DeleteMonitorChangesByType(changeType string) (int64, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return 0, err
+	}
+	return database.DeleteMonitorChangesByType(changeType)
+}
+
 // InsertKeyhackTemplate inserts or updates a KeyHack template
 func InsertKeyhackTemplate(keyname, commandTemplate, method, url, header, body, notes, description string) error {
 	database, err := getInitializedDB()

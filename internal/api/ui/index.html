@@ -46,8 +46,6 @@
 
     <nav class="sidebar-nav">
       <div class="nav-section">
-        <div class="nav-section-label">Main</div>
-
         <div class="nav-item active" id="nav-overview" data-label="Overview">
           <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
           <span>Overview</span>
@@ -58,83 +56,67 @@
           <span>Scans</span>
         </div>
 
-        <div class="nav-item" id="nav-domains" data-label="Domains">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
-          <span>Domains</span>
-        </div>
-
-        <div class="nav-item" id="nav-subdomains" data-label="Subdomains">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-          <span>Subdomains</span>
-          <span class="nav-badge" id="subdomains-badge" style="display:none"></span>
-        </div>
-      </div>
-
-      <div class="nav-section">
-        <div class="nav-section-label">Intelligence</div>
-
         <div class="nav-item" id="nav-monitor" data-label="Monitor">
           <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
           <span>Monitor</span>
         </div>
 
-        <div class="nav-item" id="nav-targets" data-label="Targets">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
-          <span>Targets</span>
+        <div class="nav-group">
+          <div class="nav-item nav-group-head" id="nav-group-assets" data-label="Asset Management" aria-expanded="false">
+            <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span>
+            <span>Asset Management</span>
+            <svg class="nav-caret" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subitems" id="assets-subnav" role="menu">
+            <div class="nav-subitem" id="nav-targets" data-label="Targets" role="menuitem">Targets</div>
+            <div class="nav-subitem" id="nav-programs" data-label="Programs" role="menuitem">Programs</div>
+            <div class="nav-subitem" id="nav-domains" data-label="Domains" role="menuitem">Domains</div>
+            <div class="nav-subitem" id="nav-subdomains" data-label="Subdomains" role="menuitem">Subdomains<span class="nav-badge" id="subdomains-badge" style="display:none"></span></div>
+          </div>
         </div>
 
-        <div class="nav-item" id="nav-programs" data-label="Programs">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
-          <span>Programs</span>
+        <div class="nav-group">
+          <div class="nav-item nav-group-head" id="nav-group-mobile" data-label="Mobile" aria-expanded="false">
+            <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg></span>
+            <span>Mobile</span>
+            <svg class="nav-caret" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subitems" id="mobile-subnav" role="menu">
+            <div class="nav-subitem" id="nav-apkauditor" data-label="APK Auditor" role="menuitem">APK Auditor</div>
+            <div class="nav-subitem" id="nav-ipaauditor" data-label="IPA Auditor" role="menuitem">IPA Auditor</div>
+            <div class="nav-subitem" id="nav-adbauditor" data-label="ADB Auditor" role="menuitem">ADB Auditor</div>
+          </div>
         </div>
 
-        <div class="nav-item" id="nav-keyhacks" data-label="Keyhacks">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
-          <span>Keyhacks</span>
+        <div class="nav-group">
+          <div class="nav-item nav-group-head" id="nav-securitylab" data-label="Security Lab" aria-expanded="false">
+            <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2v17.5c0 1.4-1.1 2.5-2.5 2.5h0c-1.4 0-2.5-1.1-2.5-2.5V2"/><path d="M8.5 2h7"/><path d="M14.5 16h-5"/></svg></span>
+            <span>Security Lab</span>
+            <svg class="nav-caret" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subitems" id="securitylab-subnav" role="menu">
+            <div class="nav-subitem" id="nav-keyhacks" data-label="Keyhacks" role="menuitem">Keyhacks</div>
+            <div class="nav-subitem" data-sltab="jwt" role="menuitem">JWT Analyzer</div>
+            <div class="nav-subitem" data-sltab="regex" role="menuitem">Regex Workbench</div>
+            <div class="nav-subitem" data-sltab="depconf" role="menuitem">Dependency Confusion</div>
+            <div class="nav-subitem" data-sltab="ssrf" role="menuitem">SSRF Payloads</div>
+            <div class="nav-subitem" data-sltab="xss" role="menuitem">XSS Cheat Sheet</div>
+            <div class="nav-subitem" data-sltab="dorks" role="menuitem">Recon Dorks</div>
+            <div class="nav-subitem" data-sltab="takeover" role="menuitem">Takeover Reference</div>
+          </div>
         </div>
 
-        <div class="nav-item" id="nav-apkauditor" data-label="APK Auditor">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><path d="M12 18h.01"/></svg></span>
-          <span>APK Auditor</span>
-        </div>
-        <div class="nav-item" id="nav-ipaauditor" data-label="IPA Auditor">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 13 5 21 8 21c1.25 0 2.5-1.06 4-1.06z"/><path d="M10 2c0 2.5 2 4 2 4s2-1.5 2-4"/></svg></span>
-          <span>IPA Auditor</span>
-        </div>
-        <div class="nav-item" id="nav-adbauditor" data-label="ADB Auditor">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg></span>
-          <span>ADB Auditor</span>
-        </div>
-        <div class="nav-item nav-group-head" id="nav-securitylab" data-label="Security Lab" aria-expanded="false">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2v17.5c0 1.4-1.1 2.5-2.5 2.5h0c-1.4 0-2.5-1.1-2.5-2.5V2"/><path d="M8.5 2h7"/><path d="M14.5 16h-5"/></svg></span>
-          <span>Security Lab</span>
-          <svg class="nav-caret" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </div>
-        <div class="nav-subitems" id="securitylab-subnav" role="menu">
-          <div class="nav-subitem" data-sltab="jwt" role="menuitem">JWT Analyzer</div>
-          <div class="nav-subitem" data-sltab="regex" role="menuitem">Regex Workbench</div>
-          <div class="nav-subitem" data-sltab="depconf" role="menuitem">Dependency Confusion</div>
-          <div class="nav-subitem" data-sltab="ssrf" role="menuitem">SSRF Payloads</div>
-          <div class="nav-subitem" data-sltab="xss" role="menuitem">XSS Cheat Sheet</div>
-          <div class="nav-subitem" data-sltab="dorks" role="menuitem">Recon Dorks</div>
-          <div class="nav-subitem" data-sltab="takeover" role="menuitem">Takeover Reference</div>
-        </div>
-
-        <div class="nav-item" id="nav-r2" data-label="R2 Browser">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/></svg></span>
-          <span>R2 Browser</span>
-        </div>
-      </div>
-
-      <div class="nav-section">
-        <div class="nav-section-label">System</div>
-        <div class="nav-item" id="nav-report-templates" data-label="Report Templates">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span>
-          <span>Report Templates</span>
-        </div>
-        <div class="nav-item" id="nav-settings" data-label="Settings">
-          <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
-          <span>Settings</span>
+        <div class="nav-group">
+          <div class="nav-item nav-group-head" id="nav-group-system" data-label="System" aria-expanded="false">
+            <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
+            <span>System</span>
+            <svg class="nav-caret" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subitems" id="system-subnav" role="menu">
+            <div class="nav-subitem" id="nav-r2" data-label="R2 Browser" role="menuitem">R2 Browser</div>
+            <div class="nav-subitem" id="nav-report-templates" data-label="Report Templates" role="menuitem">Report Templates</div>
+            <div class="nav-subitem" id="nav-settings" data-label="Settings" role="menuitem">Settings</div>
+          </div>
         </div>
       </div>
     </nav>
@@ -442,9 +424,10 @@
             <option value="bc">Bugcrowd</option>
             <option value="it">Intigriti</option>
           </select>
-          <input class="search-input" id="programs-search" placeholder="Search programs…" autocomplete="off" oninput="window.ProgramsPage.renderPrograms()" />
+          <input class="search-input" id="programs-search" placeholder="Search programs…" autocomplete="off" oninput="window.ProgramsPage.onSearch()" />
         </div>
 
+        <div id="programs-watch-status" style="margin-bottom:12px;"></div>
         <div id="programs-stats-bar" style="display:flex;gap:16px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,0.5);"></div>
         <div id="programs-container">
           <div class="empty-state"><div class="empty-icon">...</div><div class="empty-title">Loading programs…</div></div>
@@ -786,55 +769,55 @@
 <div class="toast-container" id="toast-container"></div>
 
 <!-- Markdown parser for previews -->
-<script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-<!-- Page modules — defer enables parallel download while preserving execution order -->
-<script defer src="/ui/pages/app-config-state.js"></script>
-<script defer src="/ui/pages/targets.js"></script>
-<script defer src="/ui/pages/programs.js"></script>
-<script defer src="/ui/pages/keyhacks.js"></script>
-<script defer src="/ui/pages/report-templates.js"></script>
-<script defer src="/ui/pages/monitor.js"></script>
-<script defer src="/ui/pages/r2.js"></script>
-<script defer src="/ui/pages/settings.js"></script>
-<script defer src="/ui/pages/scan-detail-manifest.js"></script>
-<script defer src="/ui/pages/scan-detail-assets.js"></script>
-<script defer src="/ui/pages/scan-detail.js"></script>
-<script defer src="/ui/pages/domains.js"></script>
-<script defer src="/ui/pages/ops-tools.js"></script>
-<script defer src="/ui/pages/launcher.js"></script>
-<script defer src="/ui/pages/ui-helpers.js"></script>
-<script defer src="/ui/pages/overview.js"></script>
-<script defer src="/ui/pages/scans-page.js"></script>
-<script defer src="/ui/pages/scan-common.js"></script>
-<script defer src="/ui/pages/scan-actions.js"></script>
-<script defer src="/ui/pages/result-tables.js"></script>
-<script defer src="/ui/pages/dashboard-data.js"></script>
-<script defer src="/ui/pages/auth-session.js"></script>
-<script defer src="/ui/pages/api-client.js"></script>
-<script defer src="/ui/pages/r2-prefixes.js"></script>
-<script defer src="/ui/pages/shell-wiring.js"></script>
-<script defer src="/ui/pages/polling.js"></script>
-<script defer src="/ui/pages/dashboard-bootstrap.js"></script>
-<script defer src="/ui/pages/domain-r2-actions.js"></script>
-<script defer src="/ui/pages/scan-detail-pagination.js"></script>
-<script defer src="/ui/pages/scan-results-utils.js"></script>
-<script defer src="/ui/pages/format-utils.js"></script>
-<script defer src="/ui/pages/navigation-ui.js"></script>
-<script defer src="/ui/pages/scan-results-core.js"></script>
-<script defer src="/ui/pages/scan-detail-asm.js"></script>
-<script defer src="/ui/pages/router-core.js"></script>
-<script defer src="/ui/pages/router-navigation.js"></script>
-<script defer src="/ui/pages/category-display.js"></script>
-<script defer src="/ui/pages/domain-actions.js"></script>
-<script defer src="/ui/pages/module-registry.js"></script>
-<script defer src="/ui/pages/findings-rows.js"></script>
-<script defer src="/ui/pages/clipboard-utils.js"></script>
-<script defer src="/ui/pages/html-escape.js"></script>
-<script defer src="/ui/pages/app-core-actions.js"></script>
+<!-- Page modules -->
+<script src="/ui/pages/app-config-state.js"></script>
+<script src="/ui/pages/targets.js"></script>
+<script src="/ui/pages/programs.js"></script>
+<script src="/ui/pages/keyhacks.js"></script>
+<script src="/ui/pages/report-templates.js"></script>
+<script src="/ui/pages/monitor.js"></script>
+<script src="/ui/pages/r2.js"></script>
+<script src="/ui/pages/settings.js"></script>
+<script src="/ui/pages/scan-detail-manifest.js"></script>
+<script src="/ui/pages/scan-detail-assets.js"></script>
+<script src="/ui/pages/scan-detail.js"></script>
+<script src="/ui/pages/domains.js"></script>
+<script src="/ui/pages/ops-tools.js"></script>
+<script src="/ui/pages/launcher.js"></script>
+<script src="/ui/pages/ui-helpers.js"></script>
+<script src="/ui/pages/overview.js"></script>
+<script src="/ui/pages/scans-page.js"></script>
+<script src="/ui/pages/scan-common.js"></script>
+<script src="/ui/pages/scan-actions.js"></script>
+<script src="/ui/pages/result-tables.js"></script>
+<script src="/ui/pages/dashboard-data.js"></script>
+<script src="/ui/pages/auth-session.js"></script>
+<script src="/ui/pages/api-client.js"></script>
+<script src="/ui/pages/r2-prefixes.js"></script>
+<script src="/ui/pages/shell-wiring.js"></script>
+<script src="/ui/pages/polling.js"></script>
+<script src="/ui/pages/dashboard-bootstrap.js"></script>
+<script src="/ui/pages/domain-r2-actions.js"></script>
+<script src="/ui/pages/scan-detail-pagination.js"></script>
+<script src="/ui/pages/scan-results-utils.js"></script>
+<script src="/ui/pages/format-utils.js"></script>
+<script src="/ui/pages/navigation-ui.js"></script>
+<script src="/ui/pages/scan-results-core.js"></script>
+<script src="/ui/pages/scan-detail-asm.js"></script>
+<script src="/ui/pages/router-core.js"></script>
+<script src="/ui/pages/router-navigation.js"></script>
+<script src="/ui/pages/category-display.js"></script>
+<script src="/ui/pages/domain-actions.js"></script>
+<script src="/ui/pages/module-registry.js"></script>
+<script src="/ui/pages/findings-rows.js"></script>
+<script src="/ui/pages/clipboard-utils.js"></script>
+<script src="/ui/pages/html-escape.js"></script>
+<script src="/ui/pages/app-core-actions.js"></script>
 
 <!-- Local auth: no external SDK needed -->
-<script defer src="/ui/app.js"></script>
-<script defer src="/ui/pages/app-exports.js"></script>
+<script src="/ui/app.js"></script>
+<script src="/ui/pages/app-exports.js"></script>
 </body>
 </html>

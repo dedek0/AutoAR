@@ -3,32 +3,69 @@
     if (window.state._shellWired) return;
     window.state._shellWired = true;
 
+    // Sidebar items are <div>s, not buttons — make them keyboard-operable: focusable
+    // and activated by Enter/Space, in addition to click.
+    const bindActivate = (el, fn) => {
+      if (!el) return;
+      el.setAttribute('tabindex', '0');
+      if (!el.getAttribute('role')) el.setAttribute('role', 'button');
+      el.addEventListener('click', fn);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+      });
+    };
+
     (window.VIEWS || []).forEach((v) => {
       const el = document.getElementById(`nav-${v}`);
-      if (el) {
-        el.addEventListener('click', () => window.navigateTo(v));
+      // A group head that is also a view (Security Lab) must NOT navigate on click —
+      // it only opens its submenu (handled below); binding navigate here too would
+      // double-fire. Its sub-items do the navigating.
+      if (el && !el.classList.contains('nav-group-head')) {
+        bindActivate(el, () => window.navigateTo(v));
       }
     });
 
-    // Security Lab is an expandable group: clicking the head toggles its tool list
-    // (it still navigates via the handler above); each sub-item deep-links to one tool.
-    const slHead = document.getElementById('nav-securitylab');
-    if (slHead) {
-      slHead.addEventListener('click', () => {
-        const expanded = slHead.classList.toggle('expanded');
-        slHead.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-      });
-    }
-    document.querySelectorAll('#securitylab-subnav .nav-subitem').forEach((el) => {
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const tab = el.dataset.sltab;
-        document.querySelectorAll('#securitylab-subnav .nav-subitem').forEach((x) => x.classList.remove('active'));
-        el.classList.add('active');
-        if (slHead) {
-          slHead.classList.add('expanded');
-          slHead.setAttribute('aria-expanded', 'true');
+    // Expandable nav groups (Asset Management, Mobile, Security Lab): the head toggles
+    // its submenu, and the open/closed choice is remembered across reloads.
+    const GROUPS_KEY = 'autoar.sidebar.groups';
+    const saveGroupState = () => {
+      const m = {};
+      document.querySelectorAll('.nav-group-head').forEach((h) => { if (h.id) m[h.id] = h.classList.contains('expanded'); });
+      try { localStorage.setItem(GROUPS_KEY, JSON.stringify(m)); } catch (e) { /* ignore */ }
+    };
+    let savedGroups = {};
+    try { savedGroups = JSON.parse(localStorage.getItem(GROUPS_KEY) || '{}'); } catch (e) { /* ignore */ }
+
+    document.querySelectorAll('.nav-group-head').forEach((head) => {
+      if (savedGroups[head.id]) {
+        head.classList.add('expanded');
+        head.setAttribute('aria-expanded', 'true');
+      }
+      bindActivate(head, () => {
+        const sidebar = document.getElementById('app-sidebar');
+        // In icon-only (collapsed) mode the submenu is hidden, so expand the sidebar
+        // first — otherwise the grouped views would be unreachable. Then open the group.
+        if (sidebar && sidebar.classList.contains('collapsed')) {
+          sidebar.classList.remove('collapsed');
+          try { localStorage.setItem('autoar.sidebar.collapsed', 'false'); } catch (e) { /* ignore */ }
+          head.classList.add('expanded');
+          head.setAttribute('aria-expanded', 'true');
+        } else {
+          const expanded = head.classList.toggle('expanded');
+          head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
         }
+        saveGroupState();
+      });
+    });
+
+    // Security Lab tool tabs (data-sltab) deep-link into the single Security Lab view.
+    // (Keyhacks also lives in this submenu but is a real view, so it's wired by the
+    // VIEWS loop above — exclude it here via the [data-sltab] filter.)
+    document.querySelectorAll('#securitylab-subnav .nav-subitem[data-sltab]').forEach((el) => {
+      bindActivate(el, () => {
+        const tab = el.dataset.sltab;
+        document.querySelectorAll('#securitylab-subnav .nav-subitem[data-sltab]').forEach((x) => x.classList.remove('active'));
+        el.classList.add('active');
         window.state._securityLabTab = tab;
         window.navigateTo('securitylab');
       });

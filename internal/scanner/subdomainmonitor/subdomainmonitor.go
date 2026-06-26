@@ -16,11 +16,11 @@ import (
 type ChangeType string
 
 const (
-	ChangeTypeNewSubdomain    ChangeType = "new_subdomain"
-	ChangeTypeStatusChanged   ChangeType = "status_changed"
-	ChangeTypeBecameLive      ChangeType = "became_live"
-	ChangeTypeBecameDead      ChangeType = "became_dead"
-	ChangeTypeNewJSEndpoint   ChangeType = "new_js_endpoint"
+	ChangeTypeNewSubdomain  ChangeType = "new_subdomain"
+	ChangeTypeStatusChanged ChangeType = "status_changed"
+	ChangeTypeBecameLive    ChangeType = "became_live"
+	ChangeTypeBecameDead    ChangeType = "became_dead"
+	ChangeTypeNewJSEndpoint ChangeType = "new_js_endpoint"
 )
 
 // EndpointChange represents a newly-discovered JS endpoint for a domain.
@@ -58,7 +58,7 @@ type MonitorResult struct {
 type MonitorOptions struct {
 	Domain      string
 	Threads     int
-	CheckNew    bool // Check for new subdomains (404 -> 200)
+	CheckNew    bool // Check for new subdomains (known host 404 -> 200)
 	Reenumerate bool // Re-run passive enumeration to find brand-new hostnames
 	MonitorJS   bool // Diff JS endpoints across the domain's live hosts (heavier)
 	// SuppressBaseline silences new_subdomain/new_js_endpoint alerts on a target's
@@ -108,6 +108,9 @@ func MonitorSubdomains(opts MonitorOptions) (*MonitorResult, error) {
 	}
 
 	// ── Re-enumeration: discover brand-new hostnames not yet in the DB ──────────────
+	// This is what turns the monitor from "liveness of known hosts" into "new asset
+	// discovery". New rows are persisted (is_live=false) so the next cycle's liveness
+	// pass picks them up; the new_subdomain alert is suppressed on the baseline run.
 	if opts.Reenumerate {
 		discovered, derr := subdomains.EnumerateFresh(opts.Domain, opts.Threads)
 		if derr != nil {
