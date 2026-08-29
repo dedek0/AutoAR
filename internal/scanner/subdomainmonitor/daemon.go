@@ -50,6 +50,7 @@ func StartDaemon() error {
 	daemonWg.Add(1)
 	go func() {
 		defer daemonWg.Done()
+		defer utils.RecoverPanic("subdomain-monitor:loop")
 		runDaemonLoop()
 	}()
 
@@ -140,6 +141,7 @@ func checkAllRunningTargets() {
 		monitorInFlightMu.Unlock()
 
 		go func(t db.SubdomainMonitorTarget) {
+			defer utils.RecoverPanic("subdomain-monitor:check:" + t.Domain)
 			defer func() {
 				monitorInFlightMu.Lock()
 				delete(monitorInFlight, t.ID)
@@ -232,38 +234,44 @@ func persistAndNotifyChanges(t db.SubdomainMonitorTarget, result *MonitorResult)
 	utils.SendMonitorWebhook(msg)
 }
 
+// maxAlertItemsPerCategory caps how many individual hosts are listed per change
+// category in a webhook alert. A big liveness flap can produce hundreds of status
+// changes; listing them all is spammy (and, before chunking, blew past Discord's
+// limit). The count is always shown in full; only the itemized list is capped.
+const maxAlertItemsPerCategory = 20
+
 // formatChangeAlert returns a webhook-ready markdown summary of detected changes.
 func formatChangeAlert(domain string, r *MonitorResult) string {
 	msg := fmt.Sprintf(" **Subdomain Monitor Alert** — `%s`\n", domain)
-	if len(r.NewSubdomains) > 0 {
-		msg += fmt.Sprintf(" **%d new** subdomain(s) appeared\n", len(r.NewSubdomains))
-		for _, c := range r.NewSubdomains {
-			msg += fmt.Sprintf("  • `%s` — %s\n", c.Subdomain, c.Message)
-		}
-	}
-	if len(r.BecameLive) > 0 {
-		msg += fmt.Sprintf(" **%d** became **live**\n", len(r.BecameLive))
-		for _, c := range r.BecameLive {
-			msg += fmt.Sprintf("  • `%s` — %s\n", c.Subdomain, c.Message)
-		}
-	}
-	if len(r.BecameDead) > 0 {
-		msg += fmt.Sprintf(" **%d** became **dead**\n", len(r.BecameDead))
-		for _, c := range r.BecameDead {
-			msg += fmt.Sprintf("  • `%s` — %s\n", c.Subdomain, c.Message)
-		}
-	}
-	if len(r.StatusChanges) > 0 {
-		msg += fmt.Sprintf(" **%d** status change(s)\n", len(r.StatusChanges))
-		for _, c := range r.StatusChanges {
-			msg += fmt.Sprintf("  • `%s` — %s\n", c.Subdomain, c.Message)
-		}
-	}
+	msg += changeSection("**%d new** subdomain(s) appeared", r.NewSubdomains)
+	msg += changeSection("**%d** became **live**", r.BecameLive)
+	msg += changeSection("**%d** became **dead**", r.BecameDead)
+	msg += changeSection("**%d** status change(s)", r.StatusChanges)
 	if len(r.NewEndpoints) > 0 {
 		msg += fmt.Sprintf(" **%d new** JS endpoint(s) discovered\n", len(r.NewEndpoints))
-		for _, e := range r.NewEndpoints {
+		for i, e := range r.NewEndpoints {
+			if i >= maxAlertItemsPerCategory {
+				msg += fmt.Sprintf("  …and %d more\n", len(r.NewEndpoints)-maxAlertItemsPerCategory)
+				break
+			}
 			msg += fmt.Sprintf("  • `%s`\n", e.Endpoint)
 		}
 	}
 	return msg
+}
+
+// changeSection renders a "%d …" header + a capped bullet list of the changes.
+func changeSection(headerFmt string, changes []SubdomainChange) string {
+	if len(changes) == 0 {
+		return ""
+	}
+	out := " " + fmt.Sprintf(headerFmt, len(changes)) + "\n"
+	for i, c := range changes {
+		if i >= maxAlertItemsPerCategory {
+			out += fmt.Sprintf("  …and %d more\n", len(changes)-maxAlertItemsPerCategory)
+			break
+		}
+		out += fmt.Sprintf("  • `%s` — %s\n", c.Subdomain, c.Message)
+	}
+	return out
 }

@@ -1203,6 +1203,7 @@
     const copyTsvBtn = root.querySelector('#recon-copy-selected-tsv');
     const exportJsonBtn = root.querySelector('#recon-export-all-json');
     const reportAiBtn = root.querySelector('#recon-report-selected-ai');
+    const exportCsvBtn = document.getElementById('scan-detail-export-csv-btn');
     if (copyTsvBtn) {
       copyTsvBtn.addEventListener('click', async () => {
         const rows = collectCheckedFindingRows();
@@ -1252,6 +1253,59 @@
           reportAiBtn.disabled = false; reportAiBtn.textContent = orig;
         }
       });
+    }
+    if (exportCsvBtn) {
+      exportCsvBtn.onclick = () => {
+        // Page-level export: the whole scan's findings across every tab/module,
+        // not just whatever tab happens to be active (which defaults to "assets"
+        // and can legitimately have zero unified-table rows).
+        const exportedRows = allRows.filter(r => !HIDDEN_KINDS.has(r.kind));
+        if (!exportedRows.length) { showToast('info', 'No findings', 'There are no findings for this scan to export.'); return; }
+
+        const headers = ['MODULE', 'KIND', 'SEVERITY', 'TARGET', 'FINDING', 'DETAIL'];
+        const rows = exportedRows.map(r => {
+          const info = (r.raw && r.raw.info) || {};
+          const detailParts = [];
+          if (r.file) detailParts.push(`file: ${r.file}`);
+          if (info.line) detailParts.push(`line: ${info.line}`);
+          if (info.url) detailParts.push(`url: ${info.url}`);
+          if (info.matched || info.match) detailParts.push(`match: ${info.matched || info.match}`);
+          // Several bulk-discovery kinds (urls, tech, dns-takeover, ...) carry no
+          // real per-row description — finding/title is just an echo of the module
+          // name (e.g. "autoar"/"tech-detect"). Repeating that placeholder makes
+          // otherwise-distinct rows (they always have a different TARGET) look like
+          // duplicates. Drop it there; TARGET already carries the real content.
+          const rawFinding = r.finding || r.title || '';
+          const finding = (rawFinding && rawFinding !== r.module && rawFinding !== r.kind) ? rawFinding : '';
+          return [
+            r.module || '',
+            r.kind || '',
+            r.severity || '',
+            r.target || r.host || '',
+            finding,
+            detailParts.join(' | '),
+          ];
+        });
+
+        const csvEscape = (v) => {
+          const s = String(v ?? '');
+          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        };
+        const csv = [headers, ...rows].map(row => row.map(csvEscape).join(',')).join('\r\n');
+
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const target = String(scanRecord?.target || scanRecord?.Target || scanId).replace(/[^a-z0-9._-]+/gi, '_');
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `findings-${target}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        showToast('success', 'Exported', `Exported ${exportedRows.length} finding(s) as CSV`);
+      };
     }
     if (exportJsonBtn) {
       exportJsonBtn.addEventListener('click', async () => {

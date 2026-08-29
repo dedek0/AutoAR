@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/h0tak88r/AutoAR/internal/accounts"
+	"github.com/h0tak88r/AutoAR/internal/db"
 	"github.com/tidwall/gjson"
 )
 
@@ -43,6 +45,39 @@ type ProgramSummary struct {
 	UpdatedAt             string       `json:"updated_at"`               // when we last fetched this
 	Stats                 ProgramStats `json:"stats"`
 	Assets                []string     `json:"-"`                        // all in-scope asset identifiers (internal, for scope-change monitoring)
+	ExternalPlatform      string       `json:"external_platform,omitempty"` // real platform for aggregator sources (e.g. "Immunefi" for Platform=="ha")
+	Sources               []string     `json:"sources,omitempty"`        // account label(s) that can see this program (multi-account)
+}
+
+// mergeProgramsByHandle appends src programs into dst, deduping by (platform,
+// handle). When a program is already present from another account, the source
+// account label is unioned onto its Sources tag rather than duplicating the row.
+func mergeProgramsByHandle(dst []ProgramSummary, idx map[string]int, src []ProgramSummary, sourceLabel string) []ProgramSummary {
+	for _, p := range src {
+		key := strings.ToLower(p.Platform + "|" + p.Handle)
+		if at, ok := idx[key]; ok {
+			dst[at].Sources = appendUniqueStr(dst[at].Sources, sourceLabel)
+			continue
+		}
+		if sourceLabel != "" {
+			p.Sources = appendUniqueStr(p.Sources, sourceLabel)
+		}
+		dst = append(dst, p)
+		idx[key] = len(dst) - 1
+	}
+	return dst
+}
+
+func appendUniqueStr(s []string, v string) []string {
+	if v == "" {
+		return s
+	}
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
 }
 
 // ProgramStats holds user-specific stats from H1.
@@ -165,6 +200,21 @@ func apiListPrograms(c *gin.Context) {
 		}()
 	}
 
+	if platform == "all" || platform == "ywh" || platform == "yeswehack" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			progs, err := fetchYWHPrograms(bbpOnly, includeScope)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error fetching YesWeHack programs: %v\n", err)
+				return
+			}
+			mu.Lock()
+			allPrograms = append(allPrograms, progs...)
+			mu.Unlock()
+		}()
+	}
+
 	wg.Wait()
 
 	sortPrograms(allPrograms, sortBy)
@@ -176,9 +226,12 @@ func apiListPrograms(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"programs":       allPrograms,
 		"total":          len(allPrograms),
-		"has_h1_token":   os.Getenv("H1_USERNAME") != "" && os.Getenv("H1_TOKEN") != "",
-		"has_bc_token":   os.Getenv("BUGCROWD_TOKEN") != "",
-		"has_it_token":   hasIntigritiToken(),
+		"has_h1_token":   accounts.Count("h1") > 0,
+		"has_bc_token":   accounts.Count("bc") > 0,
+		"has_it_token":   accounts.Count("it") > 0,
+		"h1_accounts":    accounts.Count("h1"),
+		"bc_accounts":    accounts.Count("bc"),
+		"it_accounts":    accounts.Count("it"),
 		"scope_included": includeScope,
 		"warm":           false,
 	})
@@ -205,6 +258,14 @@ func serveProgramsPayload(c *gin.Context, payload programsCachePayload, platform
 			if p.Platform == "it" {
 				programs = append(programs, p)
 			}
+		case "ywh", "yeswehack":
+			if p.Platform == "ywh" {
+				programs = append(programs, p)
+			}
+		case "ha", "hackadvisor", "external":
+			if p.Platform == "ha" {
+				programs = append(programs, p)
+			}
 		}
 	}
 
@@ -216,6 +277,8 @@ func serveProgramsPayload(c *gin.Context, payload programsCachePayload, platform
 		"has_h1_token":   payload.HasH1Token,
 		"has_bc_token":   payload.HasBCToken,
 		"has_it_token":   payload.HasITToken,
+		"has_ywh_token":  payload.HasYWHToken,
+		"has_ha_token":   payload.HasHAToken,
 		"scope_included": true,
 		"warm":           true,
 		"stale":          stale,
@@ -256,13 +319,19 @@ func apiProgramScopeSummaries(c *gin.Context) {
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
-	h1Username := os.Getenv("H1_USERNAME")
-	h1Token := os.Getenv("H1_TOKEN")
-	h1Auth := ""
-	if h1Username != "" && h1Token != "" {
-		h1Auth = base64.StdEncoding.EncodeToString([]byte(h1Username + ":" + h1Token))
+	// Build one auth per account so a program only one account can see still resolves.
+	var h1Auths []string
+	for _, a := range accounts.For("h1") {
+		if a.Username != "" && a.Token != "" {
+			h1Auths = append(h1Auths, base64.StdEncoding.EncodeToString([]byte(a.Username+":"+a.Token)))
+		}
 	}
-	bcToken := os.Getenv("BUGCROWD_TOKEN")
+	var bcTokens []string
+	for _, a := range accounts.For("bc") {
+		if a.Token != "" {
+			bcTokens = append(bcTokens, a.Token)
+		}
+	}
 
 	for _, item := range req.Programs {
 		item.Platform = strings.ToLower(strings.TrimSpace(item.Platform))
@@ -291,13 +360,27 @@ func apiProgramScopeSummaries(c *gin.Context) {
 			fetched := false
 			switch item.Platform {
 			case "h1", "hackerone":
-				if h1Auth != "" {
-					summary, fetched = fetchH1ScopeSummary(item.Handle, h1Auth)
+				// Try each H1 account until one can see the program's scope.
+				for _, auth := range h1Auths {
+					summary, fetched = fetchH1ScopeSummary(item.Handle, auth)
+					if fetched {
+						break
+					}
 				}
 			case "bc", "bugcrowd":
-				if bcToken != "" {
-					summary = fetchBCScopeSummary(item.Handle, item.URL, bcToken)
-					fetched = true
+				// fetchBCScopeSummary doesn't return ok — all 8 failure paths
+				// return a zero-valued summary. Treat any empty result as a
+				// failed fetch so we don't overwrite persisted good data.
+				for _, tok := range bcTokens {
+					summary = fetchBCScopeSummary(item.Handle, item.URL, tok)
+					fetched = summary.ScopeTargets > 0 || summary.LatestTarget != ""
+					if fetched {
+						break
+					}
+				}
+			case "ha", "hackadvisor":
+				if hasHackAdvisorToken() {
+					summary, fetched = fetchHAScopeSummary(item.Handle)
 				}
 			}
 
@@ -307,6 +390,13 @@ func apiProgramScopeSummaries(c *gin.Context) {
 			// hide the program's real scope until the TTL expires.
 			if fetched {
 				setCachedProgramScope(cacheKey, summary)
+				// Persist last-known-good in the DB — so a search-driven refresh
+				// for a program that the warmer keeps rate-limiting still wins.
+				_ = db.UpsertProgramScope(db.PersistedProgramScope{
+					Platform: summary.Platform, Handle: summary.Handle,
+					ScopeTargets: summary.ScopeTargets, LatestTarget: summary.LatestTarget,
+					LatestTargetUpdatedAt: summary.LatestTargetUpdatedAt, LatestTargetBrief: summary.LatestTargetBrief,
+				})
 				// User-initiated force-fetch (Programs page search) → also feed the
 				// scope-update watch so a genuinely-newer-than-watermark program
 				// alerts Discord immediately, instead of waiting for the next
@@ -330,13 +420,31 @@ func apiProgramScopeSummaries(c *gin.Context) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func fetchH1Programs(bbpOnly, includeScope bool) ([]ProgramSummary, error) {
-	username := os.Getenv("H1_USERNAME")
-	token := os.Getenv("H1_TOKEN")
-
-	if username != "" && token != "" {
-		return fetchH1WithREST(bbpOnly, includeScope, username, token)
+	accts := accounts.For("h1")
+	if len(accts) == 0 {
+		// No credentials anywhere — fall back to the public GraphQL listing.
+		return fetchH1WithGraphQL(bbpOnly)
 	}
-	return fetchH1WithGraphQL(bbpOnly)
+
+	var merged []ProgramSummary
+	idx := map[string]int{}
+	var firstErr error
+	for _, a := range accts {
+		progs, err := fetchH1WithREST(bbpOnly, includeScope, a.Username, a.Token)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			fmt.Fprintf(os.Stderr, "H1 account %q fetch error: %v\n", a.Label, err)
+			continue
+		}
+		merged = mergeProgramsByHandle(merged, idx, progs, a.Label)
+	}
+	// Only surface an error if every account failed (no data at all).
+	if len(merged) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return merged, nil
 }
 
 func fetchH1WithREST(bbpOnly, includeScope bool, username, token string) ([]ProgramSummary, error) {
@@ -494,6 +602,20 @@ func enrichH1ScopeCounts(programs []ProgramSummary, auth string) {
 				p.LatestTarget = summary.LatestTarget
 				p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
 				p.LatestTargetBrief = summary.LatestTargetBrief
+				// Assets is the full in-scope identifier list. Dropping it here left
+				// ProgramSummary.Assets empty for every H1 program, which silently gave
+				// the root pipeline zero H1 roots to enumerate — it then only ever
+				// re-processed roots already in the domains table and could never
+				// discover a new one. ScopeTargets is just the count; it is not a
+				// substitute.
+				p.Assets = summary.Assets
+				// Persist last-known-good — failed/rate-limited fetches don't
+				// reach here, so a transient 429 never overwrites real data.
+				_ = db.UpsertProgramScope(db.PersistedProgramScope{
+					Platform: p.Platform, Handle: p.Handle,
+					ScopeTargets: p.ScopeTargets, LatestTarget: p.LatestTarget,
+					LatestTargetUpdatedAt: p.LatestTargetUpdatedAt, LatestTargetBrief: p.LatestTargetBrief,
+				})
 			}
 		}(&programs[i])
 	}
@@ -575,7 +697,30 @@ func fetchH1ScopeSummary(handle, auth string) (ProgramSummary, bool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func fetchBCPrograms(bbpOnly, includeScope bool) ([]ProgramSummary, error) {
-	token := os.Getenv("BUGCROWD_TOKEN")
+	accts := accounts.For("bc")
+	if len(accts) == 0 {
+		return nil, nil
+	}
+	var merged []ProgramSummary
+	idx := map[string]int{}
+	var firstErr error
+	for _, a := range accts {
+		progs, err := fetchBCProgramsWithToken(a.Token, bbpOnly, includeScope)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		merged = mergeProgramsByHandle(merged, idx, progs, a.Label)
+	}
+	if len(merged) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return merged, nil
+}
+
+func fetchBCProgramsWithToken(token string, bbpOnly, includeScope bool) ([]ProgramSummary, error) {
 	if token == "" {
 		// No BC token — return empty list gracefully (public BC API requires auth)
 		return nil, nil
@@ -679,10 +824,20 @@ func enrichBCScopeCounts(programs []ProgramSummary, token string) {
 			time.Sleep(500 * time.Millisecond) // extra spacing for BC
 
 			summary := fetchBCScopeSummary(p.Handle, p.URL, token)
-			p.ScopeTargets = summary.ScopeTargets
-			p.LatestTarget = summary.LatestTarget
-			p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
-			p.LatestTargetBrief = summary.LatestTargetBrief
+			// Only persist (and overwrite the in-memory row) when fetch actually
+			// returned scope — empty/transient failures leave prior data intact.
+			if summary.ScopeTargets > 0 || summary.LatestTarget != "" {
+				p.ScopeTargets = summary.ScopeTargets
+				p.LatestTarget = summary.LatestTarget
+				p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
+				p.LatestTargetBrief = summary.LatestTargetBrief
+				p.Assets = summary.Assets // see enrichH1ScopeCounts — the pipeline needs this
+				_ = db.UpsertProgramScope(db.PersistedProgramScope{
+					Platform: p.Platform, Handle: p.Handle,
+					ScopeTargets: p.ScopeTargets, LatestTarget: p.LatestTarget,
+					LatestTargetUpdatedAt: p.LatestTargetUpdatedAt, LatestTargetBrief: p.LatestTargetBrief,
+				})
+			}
 		}(&programs[i])
 	}
 	wg.Wait()
@@ -792,7 +947,30 @@ func intigritiToken() string {
 func hasIntigritiToken() bool { return intigritiToken() != "" }
 
 func fetchITPrograms(bbpOnly, includeScope bool) ([]ProgramSummary, error) {
-	token := intigritiToken()
+	accts := accounts.For("it")
+	if len(accts) == 0 {
+		return nil, nil
+	}
+	var merged []ProgramSummary
+	idx := map[string]int{}
+	var firstErr error
+	for _, a := range accts {
+		progs, err := fetchITProgramsWithToken(a.Token, bbpOnly, includeScope)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		merged = mergeProgramsByHandle(merged, idx, progs, a.Label)
+	}
+	if len(merged) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return merged, nil
+}
+
+func fetchITProgramsWithToken(token string, bbpOnly, includeScope bool) ([]ProgramSummary, error) {
 	if token == "" {
 		// No token — return empty gracefully (mirrors Bugcrowd behavior).
 		return nil, nil
@@ -916,10 +1094,27 @@ func enrichITScopeCounts(programs []ProgramSummary, token string) {
 			defer func() { <-sem }()
 
 			summary := fetchITScopeSummary(client, token, p.ID)
-			p.ScopeTargets = summary.ScopeTargets
-			if p.LatestTarget == "" {
-				p.LatestTarget = summary.LatestTarget
-				p.LatestTargetBrief = summary.LatestTargetBrief
+			// Only persist on a real scope payload — IT often rate-limits and the
+			// fetcher swallows that as an empty summary; leaving the in-memory row
+			// alone preserves whatever was already there (e.g. from the merged DB).
+			if summary.ScopeTargets > 0 || summary.LatestTarget != "" {
+				p.ScopeTargets = summary.ScopeTargets
+				if p.LatestTarget == "" {
+					p.LatestTarget = summary.LatestTarget
+					p.LatestTargetBrief = summary.LatestTargetBrief
+				}
+				// Overwrite LatestTargetUpdatedAt with the asset-level timestamp from
+				// fetchITScopeSummary (may be empty if IT didn't expose it). DROP the
+				// program-level lastUpdatedAt that fetchITPrograms set — otherwise the
+				// scope-update watch fires on every program edit (bounty bump, etc.)
+				// not just on real scope changes.
+				p.LatestTargetUpdatedAt = summary.LatestTargetUpdatedAt
+				p.Assets = summary.Assets // see enrichH1ScopeCounts — the pipeline needs this
+				_ = db.UpsertProgramScope(db.PersistedProgramScope{
+					Platform: p.Platform, Handle: p.Handle,
+					ScopeTargets: p.ScopeTargets, LatestTarget: p.LatestTarget,
+					LatestTargetUpdatedAt: p.LatestTargetUpdatedAt, LatestTargetBrief: p.LatestTargetBrief,
+				})
 			}
 		}(&programs[i])
 	}
@@ -967,9 +1162,16 @@ func fetchITScopeSummary(client *http.Client, token, programID string) ProgramSu
 			if target != "" {
 				summary.Assets = append(summary.Assets, target)
 			}
-			if target != "" && summary.LatestTarget == "" {
+			// Per-asset timestamp (try common IT field names). Use the LATEST one
+			// across all assets so the watch fires only when scope genuinely changes
+			// — NOT on unrelated program edits (bounty bump, description change, …)
+			// which would otherwise look like scope updates if we used the program
+			// list's program-level lastUpdatedAt.
+			updatedAt := firstGJSONString(v, "updatedAt", "lastUpdatedAt", "modifiedAt", "addedAt", "createdAt")
+			if target != "" && (summary.LatestTarget == "" || isNewerProgramTime(updatedAt, summary.LatestTargetUpdatedAt)) {
 				summary.LatestTarget = target
 				summary.LatestTargetBrief = firstGJSONString(v, "description", "type.value")
+				summary.LatestTargetUpdatedAt = updatedAt
 			}
 			return true
 		})

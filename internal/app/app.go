@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/h0tak88r/AutoAR/internal/accounts"
 	"github.com/h0tak88r/AutoAR/internal/api"
 	"github.com/h0tak88r/AutoAR/internal/db"
 	"github.com/h0tak88r/AutoAR/internal/envloader"
@@ -64,8 +65,31 @@ func StartAPI() error {
 	// dashboard Settings page persist across redeployments.
 	utils.InitTimeoutDB(db.GetSetting)
 
+	// Hydrate UI-saved API keys / webhooks from the DB into the process env so they
+	// survive Dokploy redeployments (which reset the container .env). DB values win
+	// over the container env for these keys; keys never saved via the UI are left
+	// as the container env provides them.
+	if os.Getenv("DB_HOST") != "" {
+		// Copy any persisted setting (webhook, provider keys, ...) that lives only in
+		// the container env into the DB once, so it survives a redeploy and the env
+		// var can be dropped from the deployment. Runs BEFORE HydrateEnvFromDB so the
+		// just-seeded values are loaded back into the process env in the same boot.
+		api.SeedDBFromEnv()
+		api.HydrateEnvFromDB()
+		// Import the legacy single-account env credentials into the DB accounts
+		// table (one-shot) so the Settings accounts manager is the single source of
+		// truth. Runs after HydrateEnvFromDB so UI-saved values are picked up too.
+		accounts.MigrateEnvAccounts()
+	}
+
 	// Ensure scans don't remain "running" across restarts (single-instance mode).
 	reconcileStaleScansOnStartup()
+
+	// Startup reconcile only catches rows orphaned by a restart. This closes rows
+	// that lose their worker while the process keeps running — otherwise they stay
+	// "running" until the next restart, inflating the active count and making
+	// "wait until all scans finish" never return.
+	api.StartOrphanedScanReaper()
 
 	// Monitor daemons are in-memory goroutines that don't survive a process restart,
 	// but the DB keeps is_running=true — so the dashboard would show monitors "running"

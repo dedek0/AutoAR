@@ -1,0 +1,322 @@
+package api
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/h0tak88r/AutoAR/internal/db"
+	"github.com/h0tak88r/AutoAR/internal/scanner/livehosts"
+	"github.com/h0tak88r/AutoAR/internal/scanner/nuclei"
+	scopemod "github.com/h0tak88r/AutoAR/internal/scanner/scope"
+	"github.com/h0tak88r/AutoAR/internal/scanner/subdomains"
+	"github.com/h0tak88r/AutoAR/internal/utils"
+	"github.com/projectdiscovery/nuclei/v3/pkg/output"
+	"github.com/sw33tLie/bbscope/pkg/scope"
+)
+
+// RootPipelineReq configures an on-demand root-domain pipeline run. Every field
+// is optional; sensible defaults are applied.
+type RootPipelineReq struct {
+	// Template: a nuclei template path/ID or raw YAML. Empty = the built-in default
+	// (the operator's ~/nuclei-templates-custom dir if present, else http/cves).
+	Template string `json:"template"`
+	// NewRootsOnly (default true): only enumerate roots that have no subdomains in
+	// the DB yet — the whole point of the pipeline is to fill gaps cheaply.
+	NewRootsOnly *bool `json:"new_roots_only"`
+	// Threads for subdomain enumeration and nuclei (default 30).
+	Threads int `json:"threads"`
+	// MaxRoots caps how many roots are enumerated this run (0 = no cap).
+	MaxRoots int `json:"max_roots"`
+	// CollectOnly stops after roots+hosts are in the DB, skipping nuclei.
+	//
+	// Collection and scanning have very different shapes: collection is slow,
+	// resumable, and only needs doing when scope changes; scanning is something
+	// you re-run per template against whatever is already stored. Fusing them
+	// meant a long collection consumed the whole budget and nuclei never ran —
+	// a 3511-root run spent 6h collecting and produced zero template results.
+	// Split, collection tops up the database and every later template runs
+	// straight off it via /api/subdomains/nuclei/run with no re-collection.
+	CollectOnly bool `json:"collect_only"`
+}
+
+// rootEnumConcurrency is how many roots enumerate at once. Enumeration is
+// network-latency bound, not CPU bound — the host sat near 50% load with 8GB
+// free while only 5 roots ran concurrently, so the cap was the bottleneck, not
+// the machine. Raising it shortens the walk without needing a bigger box.
+func rootEnumConcurrency() int {
+	if v := os.Getenv("AUTOAR_ROOT_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 12
+}
+
+// apiRunRootPipeline kicks off the on-demand pipeline:
+//
+//	all platform root domains → fast subdomain enum (only roots with no subs in
+//	the DB) → store → nuclei on the freshly-found subs → Discord for every hit.
+//
+// It returns immediately with a scan_id; progress is visible on the Scans page
+// and streamed live to the monitor webhook.
+func apiRunRootPipeline(c *gin.Context) {
+	_ = db.Init()
+	_ = db.EnsureSchema()
+
+	var req RootPipelineReq
+	_ = c.ShouldBindJSON(&req) // all fields optional — ignore bind errors
+
+	newOnly := true
+	if req.NewRootsOnly != nil {
+		newOnly = *req.NewRootsOnly
+	}
+	threads := req.Threads
+	if threads <= 0 {
+		threads = 30
+	}
+
+	scanType, label, msg := "pipeline", "root-pipeline", "Root pipeline started — watch the Scans page and Discord."
+	if req.CollectOnly {
+		scanType, label = "collect", "root-collect"
+		msg = "Root collection started — filling in roots and hosts. Run nuclei separately when it finishes."
+	}
+	scanID := scanType + "-" + time.Now().Format("20060102150405")
+	c.JSON(200, gin.H{
+		"status":  "started",
+		"scan_id": scanID,
+		"message": msg,
+	})
+
+	go RunScanInProcess(scanID, scanType, label, func() error {
+		return runRootPipeline(scanID, req.Template, newOnly, threads, req.MaxRoots, req.CollectOnly)
+	})
+}
+
+func runRootPipeline(scanID, template string, newOnly bool, threads, maxRoots int, collectOnly bool) error {
+	stdLog(scanID, "[INFO] Gathering root domains from all bug-bounty platforms…")
+	utils.SendMonitorWebhook(" **Root Pipeline started** — gathering root domains from all platforms…")
+
+	roots := gatherAllPlatformRoots()
+	if len(roots) == 0 {
+		return fmt.Errorf("no root domains found — configure platform API keys in Settings, or add domains first")
+	}
+	stdLog(scanID, "[INFO] %d unique root domain(s) across platforms", len(roots))
+
+	// Process every in-scope root. Per root: reuse stored live URLs if we have them
+	// (cheap — no re-probing), otherwise enumerate + httpx. newOnly additionally skips
+	// roots that already have subdomains but no live URLs (avoids redoing an expensive
+	// enumeration on a partially-processed domain) — it never skips a reusable root.
+	targetRoots := roots
+	if maxRoots > 0 && len(targetRoots) > maxRoots {
+		stdLog(scanID, "[INFO] capping to first %d of %d roots", maxRoots, len(targetRoots))
+		targetRoots = targetRoots[:maxRoots]
+	}
+	stdLog(scanID, "[INFO] processing %d root(s)", len(targetRoots))
+	utils.SendMonitorWebhook(fmt.Sprintf(" Root Pipeline: processing **%d** root(s) — reusing stored live URLs where available…", len(targetRoots)))
+
+	// Enumerate/reuse roots concurrently (bounded), storing each root's subs as we go.
+	var (
+		mu      sync.Mutex
+		allSubs []string
+		done    int
+		skipped int
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, rootEnumConcurrency())
+	)
+	for _, r := range targetRoots {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(root string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// Fast path: if this root already has probed live URLs stored, reuse them
+			// and skip enumeration + httpx entirely — the schemes were resolved when
+			// the subdomains were first probed, so nuclei can target them directly.
+			if stored, serr := db.ListLiveSubdomainURLs(root); serr == nil && len(stored) > 0 {
+				mu.Lock()
+				done++
+				allSubs = append(allSubs, stored...)
+				stdLog(scanID, "[OK] %s → %d stored live URLs, skipped httpx (%d/%d roots)", root, len(stored), done, len(targetRoots))
+				mu.Unlock()
+				return
+			}
+
+			// newOnly: skip roots that already have subdomains but no live URLs —
+			// they were partially enumerated before; don't redo the expensive work.
+			// (Reusable roots were already handled by the fast path above.)
+			if newOnly {
+				if n, cerr := db.CountSubdomains(root); cerr == nil && n > 0 {
+					mu.Lock()
+					skipped++
+					stdLog(scanID, "[SKIP] %s already has %d subs, no live URLs — new-roots-only", root, n)
+					mu.Unlock()
+					return
+				}
+			}
+
+			subs, err := subdomains.EnumerateSubdomains(root, threads)
+			if err != nil {
+				mu.Lock()
+				done++
+				stdLog(scanID, "[WARN] enum %s failed: %v", root, err)
+				mu.Unlock()
+				return
+			}
+			if len(subs) > 0 {
+				if ierr := db.BatchInsertSubdomains(root, subs, false); ierr != nil {
+					stdLog(scanID, "[WARN] store %s subs failed: %v", root, ierr)
+				}
+			}
+			// httpx: probe for live hosts — marks them live AND stores the resolved
+			// scheme-prefixed URL per host in the DB, so future runs skip httpx.
+			_, _ = livehosts.FilterLiveHosts(root, threads, true)
+			// Use the stored scheme-prefixed live URLs as nuclei targets (nuclei then
+			// skips its own probing). Fall back to raw subs if nothing came back live.
+			targets, _ := db.ListLiveSubdomainURLs(root)
+			liveN := len(targets)
+			if liveN == 0 {
+				targets = subs // fallback: nuclei probes these itself
+			}
+			mu.Lock()
+			done++
+			allSubs = append(allSubs, targets...)
+			stdLog(scanID, "[OK] %s → %d subs, %d live URLs (%d/%d roots)", root, len(subs), liveN, done, len(targetRoots))
+			mu.Unlock()
+		}(r)
+	}
+	wg.Wait()
+
+	allSubs = uniqueStrings(allSubs)
+	stdLog(scanID, "[INFO] collection complete: %d live host(s) to scan (%d root(s) skipped as new-roots-only)", len(allSubs), skipped)
+
+	if collectOnly {
+		// Everything found is already persisted per-root above, so stopping here
+		// loses nothing — and unlike the fused run, partial progress survives:
+		// roots done this pass are skipped or cheaply reused next time, so
+		// repeated runs converge instead of restarting.
+		stdLog(scanID, "[OK] Root collection complete — %d root(s) processed, %d skipped, %d live host(s) now available",
+			len(targetRoots), skipped, len(allSubs))
+		utils.SendMonitorWebhook(fmt.Sprintf(
+			" **Root collection complete**\nRoots processed: %d\nSkipped: %d\nLive hosts available: %d\n\nRun a template against them with **Run Nuclei** — no re-collection needed.",
+			len(targetRoots), skipped, len(allSubs)))
+		return nil
+	}
+
+	if len(allSubs) == 0 {
+		utils.SendMonitorWebhook(fmt.Sprintf(" Root Pipeline: no live hosts to scan (%d root(s) skipped).", skipped))
+		return nil
+	}
+	utils.SendMonitorWebhook(fmt.Sprintf(" Root Pipeline: %d live host(s) — running nuclei…", len(allSubs)))
+
+	// Write the discovered subs to a temp target file for nuclei.
+	tmpFile, err := os.CreateTemp("", "root-pipeline-targets-*.txt")
+	if err != nil {
+		return fmt.Errorf("failed to create temp target file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	for _, s := range allSubs {
+		if s != "" {
+			_, _ = tmpFile.WriteString(s + "\n")
+		}
+	}
+	tmpFile.Close()
+
+	templatePath, cleanup, tplName, err := resolvePipelineTemplate(template)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	outDir := filepath.Join(utils.GetResultsDir(), "root-pipeline", "vulnerabilities")
+	_ = os.MkdirAll(outDir, 0o755)
+	outPath := filepath.Join(outDir, "nuclei-"+scanID+".json")
+
+	stdLog(scanID, "[INFO] running nuclei template %q on %d subdomains", tplName, len(allSubs))
+	matches := 0
+	err = nuclei.RunGlobalTemplate(tmpFile.Name(), templatePath, outPath, threads, func(event *output.ResultEvent) {
+		if event == nil || event.TemplateID == "" {
+			return
+		}
+		matches++
+		msg := fmt.Sprintf(" **Root Pipeline Hit!**\n**Template:** `%s` (%s)\n**Target:** `%s`\n**Severity:** `%s`",
+			event.TemplateID, event.Info.Name, event.Matched, event.Info.SeverityHolder.Severity.String())
+		utils.SendMonitorWebhook(msg)
+		stdLog(scanID, "[VULN] %s [%s] on %s", event.Info.Name, event.Info.SeverityHolder.Severity.String(), event.Matched)
+	})
+	if err != nil {
+		return fmt.Errorf("nuclei scan failed: %w", err)
+	}
+
+	// Record the finding count so the Scans page shows the "N findings" tag.
+	_ = db.UpdateScanStats(scanID, matches, 0)
+
+	stdLog(scanID, "[OK] Root Pipeline complete — %d roots, %d subs, %d matches", len(targetRoots), len(allSubs), matches)
+	utils.SendMonitorWebhook(fmt.Sprintf(" **Root Pipeline complete**\nTemplate: `%s`\nNew roots: %d\nSubdomains: %d\nMatches: %d",
+		tplName, len(targetRoots), len(allSubs), matches))
+	return nil
+}
+
+// gatherAllPlatformRoots returns the deduped set of in-scope root domains across
+// every configured platform (via the same aggregation the Programs warmer uses),
+// unioned with root domains already tracked in the tool.
+func gatherAllPlatformRoots() []string {
+	payload := buildProgramsPayload() // fetches H1/BC/IT/HackAdvisor scope with Assets populated
+	var elems []scope.ScopeElement
+	for _, p := range payload.Programs {
+		for _, a := range p.Assets {
+			elems = append(elems, scope.ScopeElement{Target: a})
+		}
+	}
+	roots := scopemod.ScopeElementRoots(elems)
+	// Union with roots already tracked (covers manually-added domains / imports).
+	if existing, err := db.ListDomains(); err == nil {
+		roots = append(roots, existing...)
+	}
+	return uniqueStrings(roots)
+}
+
+// resolvePipelineTemplate turns the request's template field into a concrete
+// nuclei template path. Empty falls back to the operator's custom template dir
+// (~/nuclei-templates-custom) if present, else the bundled http/cves set. Raw
+// YAML (multi-line or starting with "id:") is written to a temp file.
+func resolvePipelineTemplate(template string) (path string, cleanup func(), name string, err error) {
+	cleanup = func() {}
+	t := strings.TrimSpace(template)
+
+	if t == "" {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			custom := filepath.Join(home, "nuclei-templates-custom")
+			if isDir(custom) {
+				return custom, cleanup, "nuclei-templates-custom", nil
+			}
+		}
+		cves := filepath.Join(utils.GetRootDir(), "nuclei-templates", "http", "cves")
+		if isDir(cves) {
+			return cves, cleanup, "http/cves", nil
+		}
+		return "", cleanup, "", fmt.Errorf("no template provided and no default template directory found")
+	}
+
+	if strings.Contains(t, "\n") || strings.HasPrefix(t, "id:") {
+		f, ferr := os.CreateTemp("", "pipeline-template-*.yaml")
+		if ferr != nil {
+			return "", cleanup, "", fmt.Errorf("failed to create temp template: %w", ferr)
+		}
+		_, _ = f.WriteString(t)
+		f.Close()
+		return f.Name(), func() { os.Remove(f.Name()) }, "Custom Raw Template", nil
+	}
+	return t, cleanup, t, nil
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}

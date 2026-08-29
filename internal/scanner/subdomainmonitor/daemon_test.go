@@ -130,3 +130,37 @@ func TestFormatChangeAlert(t *testing.T) {
 		})
 	}
 }
+
+// ── tests merged from upstream master ──
+
+func TestChangeSection(t *testing.T) {
+	if got := changeSection("**%d** changed", nil); got != "" {
+		t.Errorf("empty changes should render nothing, got %q", got)
+	}
+
+	one := []SubdomainChange{{Subdomain: "a.example.com", Message: "became live"}}
+	got := changeSection("**%d** became **live**", one)
+	if !strings.Contains(got, "a.example.com") || !strings.Contains(got, "became live") {
+		t.Errorf("section missing subdomain/message: %q", got)
+	}
+	if !strings.Contains(got, "1") {
+		t.Errorf("section header should include the count: %q", got)
+	}
+
+	// One over the cap: exactly maxAlertItemsPerCategory bullets, then a summary.
+	n := maxAlertItemsPerCategory + 5
+	many := make([]SubdomainChange, n)
+	for i := range many {
+		many[i] = SubdomainChange{Subdomain: "h", Message: "m"}
+	}
+	got = changeSection("**%d** status change(s)", many)
+	if bullets := strings.Count(got, "•"); bullets != maxAlertItemsPerCategory {
+		t.Errorf("expected %d bullets at cap, got %d", maxAlertItemsPerCategory, bullets)
+	}
+	if !strings.Contains(got, "…and 5 more") {
+		t.Errorf("expected overflow summary '…and 5 more', got %q", got)
+	}
+}
+
+// TestFormatChangeAlert covers the top-level alert assembler: it names the domain,
+// includes only the non-empty categories, and renders new JS endpoints.

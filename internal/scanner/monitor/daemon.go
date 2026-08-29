@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"github.com/h0tak88r/AutoAR/internal/logger"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -39,6 +39,7 @@ func StartURLMonitorDaemon() {
 	urlDaemonWg.Add(1)
 	go func() {
 		defer urlDaemonWg.Done()
+		defer utils.RecoverPanic("url-monitor:loop")
 		defer func() {
 			urlDaemonMu.Lock()
 			urlDaemonRunning = false
@@ -98,6 +99,7 @@ func checkAllURLTargets() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer utils.RecoverPanic("url-monitor:check:" + t.URL)
 			checkTarget(client, t)
 		}()
 	}
@@ -139,12 +141,12 @@ func checkTargetHash(t db.MonitorTarget, body []byte) {
 	// First run — just store the baseline hash, no alert
 	if t.LastHash == "" {
 		logger.GetLogger().Infof("[URL-MONITOR] First check for %s — storing baseline hash", t.URL)
-		_ = db.UpdateMonitorTargetLastRun(t.ID, currentHash, false)
+		advanceBaseline(t, currentHash, false)
 		return
 	}
 
 	if currentHash == t.LastHash {
-		_ = db.UpdateMonitorTargetLastRun(t.ID, currentHash, false)
+		advanceBaseline(t, currentHash, false)
 		return
 	}
 
@@ -156,7 +158,7 @@ func checkTargetHash(t db.MonitorTarget, body []byte) {
 		"old_hash": t.LastHash,
 		"new_hash": currentHash,
 	})
-	_ = db.InsertMonitorChange(&db.MonitorChange{
+	recordChange(&db.MonitorChange{
 		TargetType: "url",
 		TargetID:   t.ID,
 		Domain:     t.URL,
@@ -164,7 +166,7 @@ func checkTargetHash(t db.MonitorTarget, body []byte) {
 		Detail:     string(detail),
 		Notified:   true,
 	})
-	_ = db.UpdateMonitorTargetLastRun(t.ID, currentHash, true)
+	advanceBaseline(t, currentHash, true)
 
 	oldShort, newShort := t.LastHash, currentHash
 	if len(oldShort) > 8 {
@@ -179,6 +181,24 @@ func checkTargetHash(t db.MonitorTarget, body []byte) {
 	)
 	logger.GetLogger().Infof("[URL-MONITOR] Alert: %s", msg)
 	utils.SendMonitorWebhook(msg)
+}
+
+// advanceBaseline persists the monitor's new baseline (last_hash / last_match) and
+// logs on failure. A silently-dropped advance is a real bug: when notified is true
+// the same change re-fires the Discord alert every interval (re-alert loop); on a
+// first run the target never establishes a baseline and stays non-functional.
+func advanceBaseline(t db.MonitorTarget, value string, notified bool) {
+	if err := db.UpdateMonitorTargetLastRun(t.ID, value, notified); err != nil {
+		logger.GetLogger().Errorf("[URL-MONITOR] failed to advance baseline for %s (will re-alert until this succeeds): %v", t.URL, err)
+	}
+}
+
+// recordChange writes the monitor change-history row and logs on failure, so a
+// dropped changelog entry is diagnosable instead of silently missing from the UI.
+func recordChange(c *db.MonitorChange) {
+	if err := db.InsertMonitorChange(c); err != nil {
+		logger.GetLogger().Errorf("[URL-MONITOR] failed to record change history for %s: %v", c.Domain, err)
+	}
 }
 
 // looksLikeSHA256Hex reports whether s is a 64-char hex string (legacy hash baseline).
@@ -212,7 +232,17 @@ func checkTargetRegex(t db.MonitorTarget, body []byte) {
 	}
 
 	text := string(body)
-	match := re.FindString(text)
+	// Use ALL matches and pick the MAX (latest date / highest version / lexically
+	// largest), not FindString's first match. A page that lists multiple matching
+	// items (e.g. blog posts) often re-orders them between requests — picking the
+	// first match flapped the baseline, e.g. blackline.com/blog/ alerting 23 → 24 →
+	// 23 → 24 inside 4 minutes as the featured post shuffled. The max is stable
+	// regardless of ordering.
+	matches := re.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return // nothing to compare; don't churn the baseline on a transient empty fetch
+	}
+	match := maxRegexMatch(matches)
 
 	// Switched from hash strategy — old last_hash is hex; establish fresh regex baseline.
 	baseline := t.LastHash
@@ -222,12 +252,23 @@ func checkTargetRegex(t db.MonitorTarget, body []byte) {
 
 	if baseline == "" {
 		logger.GetLogger().Infof("[URL-MONITOR] First check for %s — storing baseline regex match", t.URL)
-		_ = db.UpdateMonitorTargetLastRun(t.ID, match, false)
+		advanceBaseline(t, match, false)
 		return
 	}
 
-	if match == baseline {
-		_ = db.UpdateMonitorTargetLastRun(t.ID, match, false)
+	// Forward-only watermark: a regex monitor is for "latest X" — a backward jump
+	// (older date / lower version) is almost always page-ordering noise, not a real
+	// rollback. Skip the alert AND don't advance the baseline so the baseline stays
+	// at the genuine high-water-mark; the next refresh comparing against it will be
+	// stable. Use compareWatchValue which parses dates (ISO + "Jan 2, 2006") and
+	// falls back to lexical compare for arbitrary patterns.
+	cmp := compareWatchValue(match, baseline)
+	if cmp == 0 {
+		advanceBaseline(t, match, false)
+		return
+	}
+	if cmp < 0 {
+		// Match went backwards — keep the baseline, don't alert, don't advance.
 		return
 	}
 
@@ -243,7 +284,7 @@ func checkTargetRegex(t db.MonitorTarget, body []byte) {
 	}
 	detail, _ := json.Marshal(detailObj)
 
-	_ = db.InsertMonitorChange(&db.MonitorChange{
+	recordChange(&db.MonitorChange{
 		TargetType: "url",
 		TargetID:   t.ID,
 		Domain:     t.URL,
@@ -251,7 +292,7 @@ func checkTargetRegex(t db.MonitorTarget, body []byte) {
 		Detail:     string(detail),
 		Notified:   true,
 	})
-	_ = db.UpdateMonitorTargetLastRun(t.ID, match, true)
+	advanceBaseline(t, match, true)
 
 	oldDisp, newDisp := baseline, match
 	if len(oldDisp) > 80 {
@@ -266,4 +307,52 @@ func checkTargetRegex(t db.MonitorTarget, body []byte) {
 	)
 	logger.GetLogger().Infof("[URL-MONITOR] Alert: %s", msg)
 	utils.SendMonitorWebhook(msg)
+}
+
+// maxRegexMatch returns the "largest" of a non-empty slice of regex matches,
+// using compareWatchValue (date-aware where possible, lexical otherwise). This
+// makes "latest update" monitoring stable on pages that list multiple matching
+// items in a varying order.
+func maxRegexMatch(matches []string) string {
+	best := matches[0]
+	for _, m := range matches[1:] {
+		if compareWatchValue(m, best) > 0 {
+			best = m
+		}
+	}
+	return best
+}
+
+// compareWatchValue returns >0 if a>b, <0 if a<b, 0 if equal. Tries common date
+// formats first so chronological ordering wins ("Jul 1, 2026" > "Jun 30, 2026"
+// even though lexically Jul<Jun). Falls back to plain string compare for
+// arbitrary patterns (version strings, hashes, etc.) where ASCII order is fine.
+func compareWatchValue(a, b string) int {
+	ta, aOK := tryParseWatchDate(a)
+	tb, bOK := tryParseWatchDate(b)
+	if aOK && bOK {
+		return ta.Compare(tb)
+	}
+	return strings.Compare(a, b)
+}
+
+func tryParseWatchDate(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	formats := []string{
+		"2006-01-02",
+		"Jan 2, 2006",
+		"January 2, 2006",
+		"Jan 02, 2006",
+		"02 Jan 2006",
+		time.RFC3339,
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -247,6 +248,20 @@ func (p *PostgresDB) InitSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_program_assets_key ON program_assets(program_key);
 
+	-- Persistent last-known-good scope per program. Catalogue payload overlays
+	-- these onto the freshly-fetched program list — a rate-limited refresh never
+	-- wipes a program's previously-known scope.
+	CREATE TABLE IF NOT EXISTS program_scope (
+		platform VARCHAR(16) NOT NULL,
+		handle VARCHAR(255) NOT NULL,
+		scope_targets INTEGER DEFAULT 0,
+		latest_target VARCHAR(1024) DEFAULT '',
+		latest_target_updated_at VARCHAR(64) DEFAULT '',
+		latest_target_brief VARCHAR(2048) DEFAULT '',
+		fetched_at TIMESTAMP DEFAULT NOW(),
+		PRIMARY KEY (platform, handle)
+	);
+
 	-- Create keyhack_templates table with proper constraints
 	CREATE TABLE IF NOT EXISTS keyhack_templates (
 		id SERIAL PRIMARY KEY,
@@ -362,7 +377,7 @@ func (p *PostgresDB) InitSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_domain ON monitor_changes(domain);
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_detected_at ON monitor_changes(detected_at);
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_change_type ON monitor_changes(change_type);
-	
+
 	-- Create scans table for scan progress tracking
 	CREATE TABLE IF NOT EXISTS scans (
 		id SERIAL PRIMARY KEY,
@@ -433,11 +448,72 @@ func (p *PostgresDB) InitSchema() error {
 		value TEXT NOT NULL DEFAULT '',
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
+
+	-- Bug-bounty platform accounts (multiple accounts per platform).
+	CREATE TABLE IF NOT EXISTS bbp_accounts (
+		id          BIGSERIAL PRIMARY KEY,
+		platform    TEXT NOT NULL,
+		label       TEXT NOT NULL DEFAULT '',
+		username    TEXT NOT NULL DEFAULT '',
+		token       TEXT NOT NULL DEFAULT '',
+		email       TEXT NOT NULL DEFAULT '',
+		password    TEXT NOT NULL DEFAULT '',
+		totp_secret TEXT NOT NULL DEFAULT '',
+		enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at  TIMESTAMP DEFAULT NOW(),
+		UNIQUE(platform, label)
+	);
+
+	-- Bug-bounty program catalog for keyword/domain lookup.
+	CREATE TABLE IF NOT EXISTS bbp_catalog_programs (
+		id            BIGSERIAL PRIMARY KEY,
+		source        TEXT NOT NULL,
+		company       TEXT NOT NULL DEFAULT '',
+		handle        TEXT NOT NULL DEFAULT '',
+		url           TEXT NOT NULL DEFAULT '',
+		rewards       TEXT NOT NULL DEFAULT '',
+		safe_harbor   TEXT NOT NULL DEFAULT '',
+		offers_bounty BOOLEAN NOT NULL DEFAULT TRUE,
+		updated_at    TIMESTAMP DEFAULT NOW(),
+		UNIQUE(source, handle)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bbp_catalog_company ON bbp_catalog_programs(lower(company));
+	CREATE TABLE IF NOT EXISTS bbp_catalog_domains (
+		program_id BIGINT NOT NULL REFERENCES bbp_catalog_programs(id) ON DELETE CASCADE,
+		domain     TEXT NOT NULL,
+		in_scope   BOOLEAN NOT NULL DEFAULT TRUE,
+		UNIQUE(program_id, domain)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bbp_catalog_domain ON bbp_catalog_domains(lower(domain));
 	`
 
 	_, err := p.pool.Exec(p.ctx, schema)
 	if err != nil {
 		return fmt.Errorf("failed to create schema: %v", err)
+	}
+
+	// subdomain_hosts presents each subdomain as a probed URL (https://host) while
+	// the base table keeps the bare hostname as its unique dedup key. This is the
+	// SQL twin of SubdomainStatus.BestURL, so raw queries and external tooling see
+	// URLs without the storage ever holding one. CREATE OR REPLACE keeps it in
+	// sync if the formula changes.
+	// DROP+CREATE rather than CREATE OR REPLACE: the view selects s.*, and
+	// CREATE OR REPLACE VIEW cannot reorder existing columns. The next time a
+	// column is added to subdomains (via the idempotent ALTER pattern used
+	// elsewhere), s.* would shift `host`'s position and CREATE OR REPLACE would
+	// fail with "cannot change name of view column" — breaking InitSchema and
+	// the whole boot. Dropping first sidesteps that; the view is a leaf nothing
+	// depends on, so a plain DROP (no CASCADE) is safe.
+	if _, err = p.pool.Exec(p.ctx, `DROP VIEW IF EXISTS subdomain_hosts`); err != nil {
+		return fmt.Errorf("failed to drop subdomain_hosts view: %v", err)
+	}
+	_, err = p.pool.Exec(p.ctx, `
+		CREATE VIEW subdomain_hosts AS
+		SELECT s.*,
+		       COALESCE(NULLIF(s.https_url, ''), NULLIF(s.http_url, ''), 'https://' || s.subdomain) AS host
+		FROM subdomains s`)
+	if err != nil {
+		return fmt.Errorf("failed to create subdomain_hosts view: %v", err)
 	}
 
 	// Migrate legacy DBs: CREATE TABLE IF NOT EXISTS does not add new columns to existing scans tables.
@@ -449,6 +525,9 @@ func (p *PostgresDB) InitSchema() error {
 	// Migrate scan_artifacts table: add module and category columns
 	_, _ = p.pool.Exec(p.ctx, `ALTER TABLE scan_artifacts ADD COLUMN IF NOT EXISTS module TEXT`)
 	_, _ = p.pool.Exec(p.ctx, `ALTER TABLE scan_artifacts ADD COLUMN IF NOT EXISTS category TEXT`)
+
+	// Migrate bbp_accounts: totp_secret for YWH auto-reauth (email+password+2FA).
+	_, _ = p.pool.Exec(p.ctx, `ALTER TABLE bbp_accounts ADD COLUMN IF NOT EXISTS totp_secret TEXT NOT NULL DEFAULT ''`)
 
 	// Deduplicate legacy artifact rows before enforcing uniqueness.
 	_, _ = p.pool.Exec(p.ctx, `
@@ -539,7 +618,7 @@ func (p *PostgresDB) BatchInsertSubdomains(domain string, subdomains []string, i
 
 	count := 0
 	for _, subdomain := range subdomains {
-		subdomain = strings.TrimSpace(subdomain)
+		subdomain = SanitizeHostname(subdomain)
 		if subdomain == "" {
 			continue
 		}
@@ -562,6 +641,9 @@ func (p *PostgresDB) BatchInsertSubdomains(domain string, subdomains []string, i
 
 // InsertSubdomain inserts or updates a single subdomain
 func (p *PostgresDB) InsertSubdomain(domain, subdomain string, isLive bool, httpURL, httpsURL string, httpStatus, httpsStatus int) error {
+	if subdomain = SanitizeHostname(subdomain); subdomain == "" {
+		return nil
+	}
 	domainID, err := p.InsertOrGetDomain(domain)
 	if err != nil {
 		return fmt.Errorf("failed to get domain ID: %v", err)
@@ -726,6 +808,52 @@ func (p *PostgresDB) DeleteProgramScopeAssetsByKey(programKey string) (int64, er
 		return 0, fmt.Errorf("failed to delete program_assets: %v", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// UpsertProgramScope writes the last-known-good scope for one program. Only
+// called on a SUCCESSFUL fetch — failed/rate-limited fetches don't touch the
+// row, so prior data is preserved.
+func (p *PostgresDB) UpsertProgramScope(s PersistedProgramScope) error {
+	platform := strings.ToLower(strings.TrimSpace(s.Platform))
+	handle := strings.TrimSpace(s.Handle)
+	if platform == "" || handle == "" {
+		return nil
+	}
+	_, err := p.pool.Exec(p.ctx, `
+		INSERT INTO program_scope (platform, handle, scope_targets, latest_target, latest_target_updated_at, latest_target_brief, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (platform, handle) DO UPDATE SET
+			scope_targets = EXCLUDED.scope_targets,
+			latest_target = EXCLUDED.latest_target,
+			latest_target_updated_at = EXCLUDED.latest_target_updated_at,
+			latest_target_brief = EXCLUDED.latest_target_brief,
+			fetched_at = EXCLUDED.fetched_at;
+	`, platform, handle, s.ScopeTargets, s.LatestTarget, s.LatestTargetUpdatedAt, s.LatestTargetBrief)
+	if err != nil {
+		return fmt.Errorf("failed to upsert program_scope: %v", err)
+	}
+	return nil
+}
+
+// LoadProgramScopes returns every persisted scope row keyed by "<platform>:<handle>".
+func (p *PostgresDB) LoadProgramScopes() (map[string]PersistedProgramScope, error) {
+	rows, err := p.pool.Query(p.ctx, `
+		SELECT platform, handle, scope_targets, latest_target, latest_target_updated_at, latest_target_brief, fetched_at
+		FROM program_scope;
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query program_scope: %v", err)
+	}
+	defer rows.Close()
+	out := make(map[string]PersistedProgramScope)
+	for rows.Next() {
+		var s PersistedProgramScope
+		if err := rows.Scan(&s.Platform, &s.Handle, &s.ScopeTargets, &s.LatestTarget, &s.LatestTargetUpdatedAt, &s.LatestTargetBrief, &s.FetchedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan program_scope: %v", err)
+		}
+		out[strings.ToLower(s.Platform)+":"+s.Handle] = s
+	}
+	return out, rows.Err()
 }
 
 // TruncateProgramScopeAssets wipes every program_assets row.
@@ -1582,36 +1710,24 @@ func (p *PostgresDB) UpdateScanProgress(scanID string, progress *ScanProgress) e
 // AppendScanPhase atomically appends a phase name to completed_phases or failed_phases.
 // Uses SELECT ... FOR UPDATE to prevent lost updates under concurrent access.
 func (p *PostgresDB) AppendScanPhase(scanID, phaseName string, failed bool) error {
+	// col is a fixed identifier (never user input), so interpolating it is safe.
 	col := "completed_phases"
 	if failed {
 		col = "failed_phases"
 	}
-
-	tx, err := p.pool.Begin(p.ctx)
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase begin tx: %v", err)
-	}
-	defer tx.Rollback(p.ctx)
-
-	var raw []byte
-	err = tx.QueryRow(p.ctx, fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = $1 FOR UPDATE`, col), scanID).Scan(&raw)
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase read: %v", err)
-	}
-
-	var phases []string
-	unmarshalPhaseJSON(string(raw), &phases)
-	for _, ph := range phases {
-		if ph == phaseName {
-			return nil // already present, nothing to do
-		}
-	}
-	phases = append(phases, phaseName)
-	data := marshalPhaseJSON(phases)
-
-	_, err = tx.Exec(p.ctx, fmt.Sprintf(`UPDATE scans SET %s = $1, last_update = NOW(), updated_at = NOW() WHERE scan_id = $2`, col), data, scanID)
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase write: %v", err)
+	// Single atomic statement instead of read-modify-write: concurrent phases of the
+	// same scan (runParallelPhase launches each in its own goroutine) both used to
+	// SELECT the same array, append locally, and clobber each other's UPDATE — losing
+	// completed-phase entries so IsPhaseCompleted re-ran finished work. The `@>`
+	// containment guard keeps the dedup the old code had; `||` appends. If the phase
+	// is already present the WHERE excludes the row → no-op, no error.
+	sql := fmt.Sprintf(`
+		UPDATE scans
+		SET %s = COALESCE(%s, '[]'::jsonb) || to_jsonb($1::text),
+		    last_update = NOW(), updated_at = NOW()
+		WHERE scan_id = $2
+		  AND NOT (COALESCE(%s, '[]'::jsonb) @> to_jsonb($1::text))`, col, col, col)
+	if _, err := p.pool.Exec(p.ctx, sql, phaseName, scanID); err != nil {		return fmt.Errorf("AppendScanPhase write: %v", err)
 	}
 	return tx.Commit(p.ctx)
 }
@@ -1657,7 +1773,7 @@ func (p *PostgresDB) UpdateScanStatus(scanID string, status string) error {
 	now := time.Now()
 	var err error
 	
-	if status == "completed" || status == "failed" || status == "cancelled" {
+	if status == "completed" || status == "failed" || status == "cancelled" || status == "timed_out" {
 		_, err = p.pool.Exec(p.ctx, `
 			UPDATE scans SET
 				status = $1,
@@ -1796,7 +1912,7 @@ func (p *PostgresDB) ListRecentScans(limit int) ([]*ScanRecord, error) {
 			COALESCE(completed_phases, '[]'::jsonb), COALESCE(failed_phases, '[]'::jsonb),
 			files_uploaded, error_count, started_at, completed_at, last_update, COALESCE(command, ''), COALESCE(result_url, '')
 		FROM scans
-		WHERE status IN ('completed', 'failed', 'cancelled')
+		WHERE status IN ('completed', 'failed', 'cancelled', 'timed_out')
 		ORDER BY started_at DESC
 		LIMIT $1;
 	`, limit)
@@ -2028,11 +2144,14 @@ func (p *PostgresDB) GetSetting(key string) (string, error) {
 	var value string
 	err := p.pool.QueryRow(p.ctx, `SELECT value FROM settings WHERE key = $1 LIMIT 1`, key).Scan(&value)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return "", nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil // genuinely absent — not an error
 		}
-		return "", err
-	}
+		// A real failure (pool exhausted, query error, cancellation) must NOT be
+		// masked as "" — that made a transient blip indistinguishable from "setting
+		// absent", so a configured API key (settings now back the provider keys)
+		// would read as unset instead of surfacing the failure.
+		return "", fmt.Errorf("GetSetting %q: %w", key, err)	}
 	return value, nil
 }
 
@@ -2044,6 +2163,159 @@ func (p *PostgresDB) SetSetting(key, value string) error {
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 	`, key, value)
 	return err
+}
+
+// ── Bug-bounty platform accounts ─────────────────────────────────────────────
+
+// ListBBPAccounts returns accounts, optionally filtered by platform ("" = all).
+func (p *PostgresDB) ListBBPAccounts(platform string) ([]BBPAccount, error) {
+	q := `SELECT id, platform, label, username, token, email, password, totp_secret, enabled, created_at
+	      FROM bbp_accounts`
+	args := []any{}
+	if platform != "" {
+		q += ` WHERE platform = $1`
+		args = append(args, platform)
+	}
+	q += ` ORDER BY platform, label, id`
+	rows, err := p.pool.Query(p.ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BBPAccount
+	for rows.Next() {
+		var a BBPAccount
+		if err := rows.Scan(&a.ID, &a.Platform, &a.Label, &a.Username, &a.Token, &a.Email, &a.Password, &a.TOTPSecret, &a.Enabled, &a.CreatedAt); err != nil {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// UpsertBBPAccount inserts a new account or updates the existing one for
+// (platform,label). Returns the row id.
+func (p *PostgresDB) UpsertBBPAccount(a BBPAccount) (int64, error) {
+	var id int64
+	err := p.pool.QueryRow(p.ctx, `
+		INSERT INTO bbp_accounts (platform, label, username, token, email, password, totp_secret, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (platform, label) DO UPDATE SET
+			username = EXCLUDED.username, token = EXCLUDED.token,
+			email = EXCLUDED.email, password = EXCLUDED.password,
+			totp_secret = EXCLUDED.totp_secret, enabled = EXCLUDED.enabled
+		RETURNING id
+	`, a.Platform, a.Label, a.Username, a.Token, a.Email, a.Password, a.TOTPSecret, a.Enabled).Scan(&id)
+	return id, err
+}
+
+// SetBBPAccountEnabled toggles an account's enabled flag.
+func (p *PostgresDB) SetBBPAccountEnabled(id int64, enabled bool) error {
+	_, err := p.pool.Exec(p.ctx, `UPDATE bbp_accounts SET enabled = $2 WHERE id = $1`, id, enabled)
+	return err
+}
+
+// UpdateBBPAccountToken persists a refreshed token (e.g. a freshly re-authed YWH JWT).
+func (p *PostgresDB) UpdateBBPAccountToken(id int64, token string) error {
+	_, err := p.pool.Exec(p.ctx, `UPDATE bbp_accounts SET token = $2 WHERE id = $1`, id, token)
+	return err
+}
+
+// DeleteBBPAccount removes an account by id.
+func (p *PostgresDB) DeleteBBPAccount(id int64) error {
+	_, err := p.pool.Exec(p.ctx, `DELETE FROM bbp_accounts WHERE id = $1`, id)
+	return err
+}
+
+// ── Bug-bounty program catalog ───────────────────────────────────────────────
+
+func (p *PostgresDB) UpsertCatalogProgram(c CatalogProgram) (int64, error) {
+	var id int64
+	err := p.pool.QueryRow(p.ctx, `
+		INSERT INTO bbp_catalog_programs (source, company, handle, url, rewards, safe_harbor, offers_bounty, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+		ON CONFLICT (source, handle) DO UPDATE SET
+			company = EXCLUDED.company, url = EXCLUDED.url, rewards = EXCLUDED.rewards,
+			safe_harbor = EXCLUDED.safe_harbor, offers_bounty = EXCLUDED.offers_bounty, updated_at = NOW()
+		RETURNING id
+	`, c.Source, c.Company, c.Handle, c.URL, c.Rewards, c.SafeHarbor, c.OffersBounty).Scan(&id)
+	return id, err
+}
+
+func (p *PostgresDB) ReplaceCatalogDomains(programID int64, domains []CatalogDomain) error {
+	if _, err := p.pool.Exec(p.ctx, `DELETE FROM bbp_catalog_domains WHERE program_id = $1`, programID); err != nil {
+		return err
+	}
+	for _, d := range domains {
+		if d.Domain == "" {
+			continue
+		}
+		_, err := p.pool.Exec(p.ctx, `
+			INSERT INTO bbp_catalog_domains (program_id, domain, in_scope) VALUES ($1,$2,$3)
+			ON CONFLICT (program_id, domain) DO UPDATE SET in_scope = EXCLUDED.in_scope
+		`, programID, d.Domain, d.InScope)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PostgresDB) ClearCatalogSource(source string) error {
+	_, err := p.pool.Exec(p.ctx, `DELETE FROM bbp_catalog_programs WHERE source = $1`, source)
+	return err
+}
+
+func (p *PostgresDB) SearchCatalogByKeyword(q string, limit int) ([]CatalogProgram, error) {
+	rows, err := p.pool.Query(p.ctx, `
+		SELECT id, source, company, handle, url, rewards, safe_harbor, offers_bounty, updated_at
+		FROM bbp_catalog_programs
+		WHERE company ILIKE '%'||$1||'%' OR handle ILIKE '%'||$1||'%'
+		ORDER BY offers_bounty DESC, company LIMIT $2
+	`, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CatalogProgram
+	for rows.Next() {
+		var c CatalogProgram
+		if err := rows.Scan(&c.ID, &c.Source, &c.Company, &c.Handle, &c.URL, &c.Rewards, &c.SafeHarbor, &c.OffersBounty, &c.UpdatedAt); err != nil {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (p *PostgresDB) SearchCatalogByDomain(q string, limit int) ([]CatalogDomainMatch, error) {
+	rows, err := p.pool.Query(p.ctx, `
+		SELECT p.id, p.source, p.company, p.handle, p.url, p.rewards, p.safe_harbor, p.offers_bounty, p.updated_at,
+		       d.domain, d.in_scope
+		FROM bbp_catalog_domains d JOIN bbp_catalog_programs p ON d.program_id = p.id
+		WHERE lower(d.domain) = lower($1) OR d.domain ILIKE '%'||$1||'%'
+		ORDER BY (lower(d.domain) = lower($1)) DESC, d.in_scope DESC, p.company LIMIT $2
+	`, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CatalogDomainMatch
+	for rows.Next() {
+		var m CatalogDomainMatch
+		if err := rows.Scan(&m.ID, &m.Source, &m.Company, &m.Handle, &m.URL, &m.Rewards, &m.SafeHarbor, &m.OffersBounty, &m.UpdatedAt, &m.MatchedDomain, &m.InScope); err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (p *PostgresDB) CatalogCounts() (int, int, error) {
+	var progs, doms int
+	_ = p.pool.QueryRow(p.ctx, `SELECT COUNT(*) FROM bbp_catalog_programs`).Scan(&progs)
+	_ = p.pool.QueryRow(p.ctx, `SELECT COUNT(*) FROM bbp_catalog_domains`).Scan(&doms)
+	return progs, doms, nil
 }
 
 // GetAllSettings returns every setting as a key→value map.

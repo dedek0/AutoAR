@@ -132,6 +132,15 @@ type DB interface {
 	// Used to scrub the historical flood of false "new_program_asset" entries.
 	DeleteMonitorChangesByType(changeType string) (int64, error)
 
+	// UpsertProgramScope persists the last-known-good scope summary for a single
+	// program. Only called on SUCCESSFUL fetches — a failed/rate-limited fetch must
+	// NOT call this, otherwise we'd overwrite good data with empty values.
+	UpsertProgramScope(s PersistedProgramScope) error
+	// LoadProgramScopes returns every persisted scope row keyed by
+	// "<lower(platform)>:<handle>" so the warmer can overlay it onto a fresh
+	// catalogue payload (preserving prior scope when a refresh's enrichment fails).
+	LoadProgramScopes() (map[string]PersistedProgramScope, error)
+
 	// DNS Takeover Providers
 	ListVulnerableDNSProviders() (map[string]string, error)
 	AddVulnerableDNSProvider(name, fingerprint string) error
@@ -165,6 +174,22 @@ type DB interface {
 	SetSetting(key, value string) error
 	GetAllSettings() (map[string]string, error)
 
+	// Bug-bounty platform accounts (multi-account per platform).
+	// ListBBPAccounts with platform=="" returns every account.
+	ListBBPAccounts(platform string) ([]BBPAccount, error)
+	UpsertBBPAccount(a BBPAccount) (int64, error)
+	SetBBPAccountEnabled(id int64, enabled bool) error
+	UpdateBBPAccountToken(id int64, token string) error
+	DeleteBBPAccount(id int64) error
+
+	// Bug-bounty program catalog (for keyword/domain program lookup).
+	UpsertCatalogProgram(p CatalogProgram) (int64, error)
+	ReplaceCatalogDomains(programID int64, domains []CatalogDomain) error
+	ClearCatalogSource(source string) error
+	SearchCatalogByKeyword(q string, limit int) ([]CatalogProgram, error)
+	SearchCatalogByDomain(q string, limit int) ([]CatalogDomainMatch, error)
+	CatalogCounts() (programs int, domains int, err error)
+
 	// UpdateScanStats updates the counts for findings/files and errors.
 	UpdateScanStats(scanID string, filesUploaded, errorCount int) error
 
@@ -176,6 +201,49 @@ type DB interface {
 
 	// Close closes the database connection
 	Close()
+}
+
+// BBPAccount is one bug-bounty platform account (a platform can have several).
+// Token/Username/Email/Password are used per platform's auth model:
+//   h1  -> Username + Token          bc/it/ywh -> Token (ywh may use Email+Password)
+type BBPAccount struct {
+	ID         int64     `json:"id"`
+	Platform   string    `json:"platform"`
+	Label      string    `json:"label"`
+	Username   string    `json:"username"`
+	Token      string    `json:"token"`
+	Email      string    `json:"email"`
+	Password   string    `json:"password"`
+	TOTPSecret string    `json:"totp_secret"` // base32 2FA seed, for auto-reauth (YWH)
+	Enabled    bool      `json:"enabled"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// CatalogProgram is one bug-bounty program in the lookup catalog.
+type CatalogProgram struct {
+	ID           int64     `json:"id"`
+	Source       string    `json:"source"` // h1, bc, it, ywh, as93
+	Company      string    `json:"company"`
+	Handle       string    `json:"handle"`
+	URL          string    `json:"url"`
+	Rewards      string    `json:"rewards"`
+	SafeHarbor   string    `json:"safe_harbor"`
+	OffersBounty bool      `json:"offers_bounty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// CatalogDomain is one in/out-of-scope domain for a catalog program.
+type CatalogDomain struct {
+	Domain  string `json:"domain"`
+	InScope bool   `json:"in_scope"`
+}
+
+// CatalogDomainMatch is a domain-search hit: the owning program plus whether the
+// matched domain is in or out of scope.
+type CatalogDomainMatch struct {
+	CatalogProgram
+	MatchedDomain string `json:"matched_domain"`
+	InScope       bool   `json:"in_scope"`
 }
 
 // ScanRecord represents a scan stored in the database
@@ -285,6 +353,21 @@ type JSEndpoint struct {
 	SourceJS string // the JS URL it was found in (best-effort)
 }
 
+// PersistedProgramScope is the last-known-good scope summary for a single
+// bug-bounty program. UpsertProgramScope writes one of these PER successful
+// fetch; a failed/rate-limited fetch must never call upsert. The serving layer
+// overlays this on top of the freshly-built catalogue so the dashboard keeps
+// showing real values even when this refresh's enrichment came back empty.
+type PersistedProgramScope struct {
+	Platform              string // "h1" | "bc" | "it"
+	Handle                string // platform handle (e.g. "ryan-bbp")
+	ScopeTargets          int
+	LatestTarget          string
+	LatestTargetUpdatedAt string
+	LatestTargetBrief     string
+	FetchedAt             time.Time
+}
+
 // MonitorChange records a detected change for history/querying
 type MonitorChange struct {
 	ID          int
@@ -307,6 +390,31 @@ type SubdomainStatus struct {
 	IsLive      bool   `json:"is_live"`
 	Techs       string `json:"techs,omitempty"`
 	CNAMEs      string `json:"cnames,omitempty"`
+	// Host is the scheme-prefixed probed URL (https://sub.domain.com) for display
+	// and export. It is computed from the probe results via BestURL, not stored —
+	// the subdomain column stays a bare hostname (the unique dedup key). Populated
+	// by the API layer before returning; empty in raw DB reads.
+	Host string `json:"host,omitempty"`
+}
+
+// BestURL returns the scheme-prefixed URL to use for this subdomain, preferring
+// the scheme that actually responded (https first). Used so downstream nuclei
+// scans can target the already-probed URL and skip re-running httpx.
+func (s SubdomainStatus) BestURL() string {
+	switch {
+	case s.HTTPSStatus > 0 && s.HTTPSURL != "":
+		return s.HTTPSURL
+	case s.HTTPStatus > 0 && s.HTTPURL != "":
+		return s.HTTPURL
+	case s.HTTPSURL != "":
+		return s.HTTPSURL
+	case s.HTTPURL != "":
+		return s.HTTPURL
+	case s.Subdomain != "":
+		return "https://" + s.Subdomain
+	default:
+		return ""
+	}
 }
 
 // GlobalSubdomain extends SubdomainStatus with the root domain

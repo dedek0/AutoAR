@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 )
 
 func main() {
@@ -24,28 +23,6 @@ func main() {
 	os.Setenv("AUTOAR_CONFIG_FILE", "/app/autoar.yaml")
 	os.Setenv("AUTOAR_ENV", "docker")
 	fmt.Println("[entrypoint] Configuration loaded successfully")
-
-	fmt.Println("[entrypoint] Checking IPATOOL environment variables...")
-	if val := os.Getenv("IPATOOL_EMAIL"); val != "" {
-		fmt.Printf("[entrypoint] IPATOOL_EMAIL is set (length: %d)\n", len(val))
-	} else {
-		fmt.Println("[entrypoint] IPATOOL_EMAIL is NOT set")
-	}
-	if val := os.Getenv("IPATOOL_PASSWORD"); val != "" {
-		fmt.Printf("[entrypoint] IPATOOL_PASSWORD is set (length: %d)\n", len(val))
-	} else {
-		fmt.Println("[entrypoint] IPATOOL_PASSWORD is NOT set")
-	}
-	if val := os.Getenv("IPATOOL_KEYCHAIN_PASSPHRASE"); val != "" {
-		fmt.Printf("[entrypoint] IPATOOL_KEYCHAIN_PASSPHRASE is set (length: %d)\n", len(val))
-	} else {
-		fmt.Println("[entrypoint] IPATOOL_KEYCHAIN_PASSPHRASE is NOT set - iOS downloads will fail!")
-	}
-	if val := os.Getenv("IPATOOL_AUTH_CODE"); val != "" {
-		fmt.Printf("[entrypoint] IPATOOL_AUTH_CODE is set (length: %d)\n", len(val))
-	} else {
-		fmt.Println("[entrypoint] IPATOOL_AUTH_CODE is not set (optional)")
-	}
 
 	fmt.Println("[entrypoint] Database schema initialization delegated to API/Bot startup")
 
@@ -68,11 +45,6 @@ func main() {
 	}
 	if err := os.MkdirAll(resultsDir, 0755); err != nil {
 		fmt.Printf("[entrypoint] Warning: Failed to create results directory: %v\n", err)
-	}
-
-	if strings.TrimSpace(os.Getenv("APKX_WORKERS")) == "" {
-		_ = os.Setenv("APKX_WORKERS", "2")
-		fmt.Println("[entrypoint] APKX_WORKERS not set; defaulting to 2 for stability")
 	}
 
 	if _, err := os.Stat("/usr/local/bin/autoar"); err != nil {

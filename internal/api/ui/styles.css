@@ -594,6 +594,84 @@ input, select, textarea { font-family: inherit; }
 
 .card-body { padding: 0; }
 
+/* ── Collapsible sections ───────────────────────────────────────────────────
+   Used by the Monitor page so its four panels (and each panel's "add" form)
+   fold away instead of stacking into one very long scroll. Height animates via
+   grid-template-rows 0fr→1fr rather than a max-height guess, because the
+   target tables grow with the number of monitors. */
+
+.acc-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.acc-caret {
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: transform 0.2s ease, opacity var(--transition);
+}
+.acc-toggle:hover .acc-caret { opacity: 0.95; }
+.acc-toggle[aria-expanded="true"] .acc-caret { transform: rotate(90deg); opacity: 0.9; }
+.acc-toggle:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.acc-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s ease;
+}
+.acc-panel.open { grid-template-rows: 1fr; }
+/* min-height:0 lets the grid row actually collapse below content height. */
+.acc-panel > .acc-inner { overflow: hidden; min-height: 0; }
+
+/* A collapsed panel has nothing under the header, so drop the divider. */
+.card-header.collapsed { border-bottom-color: transparent; }
+
+.acc-chip {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.acc-chip.on {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan-dim);
+}
+
+/* Nested "add a monitor" disclosure inside a panel. */
+.acc-sub {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, .2);
+  margin-bottom: 18px;
+}
+.acc-sub-head { padding: 11px 14px; }
+.acc-sub-title { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.acc-sub-body { padding: 0 14px 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .acc-panel, .acc-caret { transition: none; }
+}
+
 /* ── Tables ─────────────────────────────────────────────────────────────────── */
 
 .data-table {
@@ -3883,3 +3961,197 @@ select.input {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* ── Settings category tabs ─────────────────────────────────────── */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 4px 0 14px;
+  margin-bottom: 4px;
+  background: var(--bg-base, var(--bg-surface));
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition);
+}
+
+.settings-tab:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-cyan-dim, var(--accent-cyan));
+}
+
+.settings-tab.active {
+  color: #05121a;
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 4px 14px var(--accent-cyan-dim, rgba(34, 211, 238, 0.25));
+}
+
+@media (max-width: 720px) {
+  .settings-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .settings-tabs::-webkit-scrollbar { display: none; }
+  .settings-control { width: 100%; }
+  .settings-item { flex-direction: column; gap: 12px; }
+}
+
+/* ── Multi-account manager (Settings → Platforms & Keys) ─────────────── */
+.acct-platform {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.acct-platform:last-child { border-bottom: none; }
+
+.acct-platform-head {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.acct-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  background: var(--accent-cyan-dim, rgba(34, 211, 238, 0.15));
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.acct-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.22);
+}
+.acct-meta { flex: 1; min-width: 0; }
+.acct-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.acct-disabled { color: var(--accent-amber); font-size: 11px; font-weight: 500; }
+.acct-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct-toggle {
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.acct-toggle.on { color: var(--accent-emerald); border-color: rgba(16, 185, 129, 0.4); }
+.acct-toggle.off { color: var(--accent-amber); border-color: rgba(245, 158, 11, 0.4); }
+.acct-del {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: transparent;
+  color: #ef4444;
+  font-size: 11px;
+  cursor: pointer;
+}
+.acct-empty { font-size: 12px; color: var(--text-muted); padding: 2px 0 8px; }
+
+.acct-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.acct-input { flex: 1; min-width: 130px; }
+.acct-add-btn { flex-shrink: 0; }
+
+/* credential validity tag + test controls */
+.acct-status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.acct-status.valid   { color: var(--accent-emerald); background: rgba(16, 185, 129, 0.13); border-color: rgba(16, 185, 129, 0.35); }
+.acct-status.invalid { color: #ef4444; background: rgba(239, 68, 68, 0.13); border-color: rgba(239, 68, 68, 0.35); }
+.acct-status.blocked { color: var(--accent-amber); background: rgba(245, 158, 11, 0.13); border-color: rgba(245, 158, 11, 0.35); }
+.acct-status.error   { color: var(--accent-amber); background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.3); }
+.acct-status.checking{ color: var(--accent-cyan); background: var(--accent-cyan-dim, rgba(34, 211, 238, 0.13)); border-color: rgba(34, 211, 238, 0.3); }
+.acct-status.muted   { color: var(--text-muted); background: rgba(255, 255, 255, 0.04); border-color: var(--border); }
+
+.acct-test {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.acct-test:hover { color: var(--text-primary); border-color: var(--accent-cyan-dim, var(--accent-cyan)); }
+
+.acct-edit {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.acct-edit:hover { color: var(--text-primary); border-color: var(--accent-cyan-dim, var(--accent-cyan)); }
+
+/* inline edit form shown when a stored account row is being edited */
+.acct-edit-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--accent-cyan-dim, rgba(34, 211, 238, 0.3));
+  border-radius: 8px;
+  background: rgba(34, 211, 238, 0.04);
+}
+.acct-input-readonly { opacity: 0.65; cursor: not-allowed; }
+
+.acct-toolbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.acct-testall {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.acct-testall:hover { color: var(--accent-cyan); border-color: var(--accent-cyan-dim, var(--accent-cyan)); }

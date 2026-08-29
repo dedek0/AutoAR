@@ -41,7 +41,7 @@ func (s *SQLiteDB) Init() error {
 	}
 
 	// Open database connection
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return fmt.Errorf("failed to open SQLite database: %v", err)
 	}
@@ -138,6 +138,20 @@ func (s *SQLiteDB) InitSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_program_assets_key ON program_assets(program_key);
 
+	-- Persistent last-known-good scope per program. The catalogue payload overlays
+	-- these on top of the freshly-fetched program list, so a rate-limited refresh
+	-- never wipes a program's previously-known scope from the dashboard.
+	CREATE TABLE IF NOT EXISTS program_scope (
+		platform TEXT NOT NULL,
+		handle TEXT NOT NULL,
+		scope_targets INTEGER DEFAULT 0,
+		latest_target TEXT DEFAULT '',
+		latest_target_updated_at TEXT DEFAULT '',
+		latest_target_brief TEXT DEFAULT '',
+		fetched_at TIMESTAMP DEFAULT (datetime('now')),
+		PRIMARY KEY (platform, handle)
+	);
+
 	-- Create keyhack_templates table
 	CREATE TABLE IF NOT EXISTS keyhack_templates (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,7 +222,7 @@ func (s *SQLiteDB) InitSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_domain ON monitor_changes(domain);
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_detected_at ON monitor_changes(detected_at);
 	CREATE INDEX IF NOT EXISTS idx_monitor_changes_change_type ON monitor_changes(change_type);
-	
+
 	-- Create scans table for scan progress tracking
 	CREATE TABLE IF NOT EXISTS scans (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -281,11 +295,61 @@ func (s *SQLiteDB) InitSchema() error {
 		value TEXT NOT NULL DEFAULT '',
 		updated_at TIMESTAMP DEFAULT (datetime('now'))
 	);
+
+	-- Bug-bounty platform accounts (multiple accounts per platform).
+	CREATE TABLE IF NOT EXISTS bbp_accounts (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		platform    TEXT NOT NULL,
+		label       TEXT NOT NULL DEFAULT '',
+		username    TEXT NOT NULL DEFAULT '',
+		token       TEXT NOT NULL DEFAULT '',
+		email       TEXT NOT NULL DEFAULT '',
+		password    TEXT NOT NULL DEFAULT '',
+		totp_secret TEXT NOT NULL DEFAULT '',
+		enabled     INTEGER NOT NULL DEFAULT 1,
+		created_at  TIMESTAMP DEFAULT (datetime('now')),
+		UNIQUE(platform, label)
+	);
+
+	-- Bug-bounty program catalog for keyword/domain lookup.
+	CREATE TABLE IF NOT EXISTS bbp_catalog_programs (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		source        TEXT NOT NULL,
+		company       TEXT NOT NULL DEFAULT '',
+		handle        TEXT NOT NULL DEFAULT '',
+		url           TEXT NOT NULL DEFAULT '',
+		rewards       TEXT NOT NULL DEFAULT '',
+		safe_harbor   TEXT NOT NULL DEFAULT '',
+		offers_bounty INTEGER NOT NULL DEFAULT 1,
+		updated_at    TIMESTAMP DEFAULT (datetime('now')),
+		UNIQUE(source, handle)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bbp_catalog_company ON bbp_catalog_programs(lower(company));
+	CREATE TABLE IF NOT EXISTS bbp_catalog_domains (
+		program_id INTEGER NOT NULL REFERENCES bbp_catalog_programs(id) ON DELETE CASCADE,
+		domain     TEXT NOT NULL,
+		in_scope   INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(program_id, domain)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bbp_catalog_domain ON bbp_catalog_domains(lower(domain));
 	`
 
 	_, err := s.db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("failed to create schema: %v", err)
+	}
+	// subdomain_hosts view: bare hostname stays the dedup key, host is the probed
+	// URL (SQL twin of BestURL). DROP+CREATE keeps it in sync (SQLite has no
+	// CREATE OR REPLACE VIEW).
+	if _, verr := s.db.Exec(`DROP VIEW IF EXISTS subdomain_hosts`); verr != nil {
+		return fmt.Errorf("failed to drop subdomain_hosts view: %v", verr)
+	}
+	if _, verr := s.db.Exec(`
+		CREATE VIEW subdomain_hosts AS
+		SELECT s.*,
+		       COALESCE(NULLIF(s.https_url, ''), NULLIF(s.http_url, ''), 'https://' || s.subdomain) AS host
+		FROM subdomains s`); verr != nil {
+		return fmt.Errorf("failed to create subdomain_hosts view: %v", verr)
 	}
 	// Migrate legacy scans table: ensure result_url exists (CREATE TABLE IF NOT EXISTS does not add columns)
 	if _, merr := s.db.Exec(`ALTER TABLE scans ADD COLUMN result_url TEXT`); merr != nil {
@@ -297,6 +361,9 @@ func (s *SQLiteDB) InitSchema() error {
 	// Migrate techs/cnames back to SQLite database subdomains
 	if _, merr := s.db.Exec(`ALTER TABLE subdomains ADD COLUMN techs TEXT DEFAULT ''`); merr != nil && !strings.Contains(strings.ToLower(merr.Error()), "duplicate column") {
 		logger.GetLogger().Warnf("[WARN] Failed to add subdomains.techs column: %v", merr)
+	}
+	if _, merr := s.db.Exec(`ALTER TABLE bbp_accounts ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''`); merr != nil && !strings.Contains(strings.ToLower(merr.Error()), "duplicate column") {
+		logger.GetLogger().Warnf("[WARN] Failed to add bbp_accounts.totp_secret column: %v", merr)
 	}
 	if _, merr := s.db.Exec(`ALTER TABLE subdomains ADD COLUMN cnames TEXT DEFAULT ''`); merr != nil && !strings.Contains(strings.ToLower(merr.Error()), "duplicate column") {
 		logger.GetLogger().Warnf("[WARN] Failed to add subdomains.cnames column: %v", merr)
@@ -411,7 +478,7 @@ func (s *SQLiteDB) BatchInsertSubdomains(domain string, subdomains []string, isL
 	count := 0
 	now := time.Now()
 	for _, subdomain := range subdomains {
-		subdomain = strings.TrimSpace(subdomain)
+		subdomain = SanitizeHostname(subdomain)
 		if subdomain == "" {
 			continue
 		}
@@ -434,6 +501,9 @@ func (s *SQLiteDB) BatchInsertSubdomains(domain string, subdomains []string, isL
 
 // InsertSubdomain inserts or updates a single subdomain
 func (s *SQLiteDB) InsertSubdomain(domain, subdomain string, isLive bool, httpURL, httpsURL string, httpStatus, httpsStatus int) error {
+	if subdomain = SanitizeHostname(subdomain); subdomain == "" {
+		return nil
+	}
 	domainID, err := s.InsertOrGetDomain(domain)
 	if err != nil {
 		return fmt.Errorf("failed to get domain ID: %v", err)
@@ -603,6 +673,52 @@ func (s *SQLiteDB) DeleteProgramScopeAssetsByKey(programKey string) (int64, erro
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// UpsertProgramScope writes the last-known-good scope for one program. Called
+// only on a SUCCESSFUL fetch — failed fetches don't touch the table, so prior
+// data is preserved.
+func (s *SQLiteDB) UpsertProgramScope(p PersistedProgramScope) error {
+	platform := strings.ToLower(strings.TrimSpace(p.Platform))
+	handle := strings.TrimSpace(p.Handle)
+	if platform == "" || handle == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO program_scope (platform, handle, scope_targets, latest_target, latest_target_updated_at, latest_target_brief, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT (platform, handle) DO UPDATE SET
+			scope_targets = excluded.scope_targets,
+			latest_target = excluded.latest_target,
+			latest_target_updated_at = excluded.latest_target_updated_at,
+			latest_target_brief = excluded.latest_target_brief,
+			fetched_at = excluded.fetched_at;
+	`, platform, handle, p.ScopeTargets, p.LatestTarget, p.LatestTargetUpdatedAt, p.LatestTargetBrief)
+	if err != nil {
+		return fmt.Errorf("failed to upsert program_scope: %v", err)
+	}
+	return nil
+}
+
+// LoadProgramScopes returns every persisted scope row keyed by "<platform>:<handle>".
+func (s *SQLiteDB) LoadProgramScopes() (map[string]PersistedProgramScope, error) {
+	rows, err := s.db.Query(`
+		SELECT platform, handle, scope_targets, latest_target, latest_target_updated_at, latest_target_brief, fetched_at
+		FROM program_scope;
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query program_scope: %v", err)
+	}
+	defer rows.Close()
+	out := make(map[string]PersistedProgramScope)
+	for rows.Next() {
+		var p PersistedProgramScope
+		if err := rows.Scan(&p.Platform, &p.Handle, &p.ScopeTargets, &p.LatestTarget, &p.LatestTargetUpdatedAt, &p.LatestTargetBrief, &p.FetchedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan program_scope: %v", err)
+		}
+		out[strings.ToLower(p.Platform)+":"+p.Handle] = p
+	}
+	return out, rows.Err()
 }
 
 // TruncateProgramScopeAssets wipes every program_assets row.
@@ -1518,38 +1634,23 @@ func (s *SQLiteDB) UpdateScanProgress(scanID string, progress *ScanProgress) err
 // AppendScanPhase atomically appends a phase name to completed_phases or failed_phases.
 // Uses a transaction to prevent lost updates under concurrent access.
 func (s *SQLiteDB) AppendScanPhase(scanID, phaseName string, failed bool) error {
+	// col is a fixed identifier (never user input), so interpolating it is safe.
 	col := "completed_phases"
 	if failed {
 		col = "failed_phases"
 	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase begin tx: %v", err)
-	}
-	defer tx.Rollback()
-
-	var raw string
-	err = tx.QueryRow(fmt.Sprintf(`SELECT %s FROM scans WHERE scan_id = ?`, col), scanID).Scan(&raw)
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase read: %v", err)
-	}
-
-	var phases []string
-	if raw != "" {
-		unmarshalPhaseJSON(raw, &phases)
-	}
-	for _, ph := range phases {
-		if ph == phaseName {
-			return nil
-		}
-	}
-	phases = append(phases, phaseName)
-	data := marshalPhaseJSON(phases)
-
-	_, err = tx.Exec(fmt.Sprintf(`UPDATE scans SET %s = ?, last_update = ?, updated_at = datetime('now') WHERE scan_id = ?`, col), data, time.Now(), scanID)
-	if err != nil {
-		return fmt.Errorf("AppendScanPhase write: %v", err)
+	// Single atomic statement instead of read-modify-write — see the Postgres twin.
+	// json_insert(..,'$[#]',?) appends to the array; the NOT EXISTS(json_each ..) guard
+	// preserves the old dedup. Already-present phase → WHERE excludes → no-op.
+	sql := fmt.Sprintf(`
+		UPDATE scans
+		SET %s = json_insert(COALESCE(NULLIF(%s, ''), '[]'), '$[#]', ?),
+		    last_update = ?, updated_at = datetime('now')
+		WHERE scan_id = ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM json_each(COALESCE(NULLIF(%s, ''), '[]')) WHERE value = ?
+		  )`, col, col, col)
+	if _, err := s.db.Exec(sql, phaseName, time.Now(), scanID, phaseName); err != nil {		return fmt.Errorf("AppendScanPhase write: %v", err)
 	}
 	return tx.Commit()
 }
@@ -1595,7 +1696,7 @@ func (s *SQLiteDB) UpdateScanStatus(scanID string, status string) error {
 	now := time.Now()
 	var err error
 	
-	if status == "completed" || status == "failed" || status == "cancelled" {
+	if status == "completed" || status == "failed" || status == "cancelled" || status == "timed_out" {
 		_, err = s.db.Exec(`
 			UPDATE scans SET
 				status = ?,
@@ -1750,7 +1851,7 @@ func (s *SQLiteDB) ListRecentScans(limit int) ([]*ScanRecord, error) {
 			COALESCE(completed_phases, '[]'), COALESCE(failed_phases, '[]'),
 			files_uploaded, error_count, started_at, completed_at, last_update, COALESCE(command, ''), COALESCE(result_url, '')
 		FROM scans
-		WHERE status IN ('completed', 'failed', 'cancelled')
+		WHERE status IN ('completed', 'failed', 'cancelled', 'timed_out')
 		ORDER BY started_at DESC
 		LIMIT ?;
 	`, limit)
@@ -2009,6 +2110,194 @@ func (s *SQLiteDB) SetSetting(key, value string) error {
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
 	`, key, value)
 	return err
+}
+
+// ── Bug-bounty platform accounts ─────────────────────────────────────────────
+
+// ListBBPAccounts returns accounts, optionally filtered by platform ("" = all).
+func (s *SQLiteDB) ListBBPAccounts(platform string) ([]BBPAccount, error) {
+	q := `SELECT id, platform, label, username, token, email, password, totp_secret, enabled, created_at
+	      FROM bbp_accounts`
+	args := []any{}
+	if platform != "" {
+		q += ` WHERE platform = ?`
+		args = append(args, platform)
+	}
+	q += ` ORDER BY platform, label, id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BBPAccount
+	for rows.Next() {
+		var a BBPAccount
+		var enabled int
+		if err := rows.Scan(&a.ID, &a.Platform, &a.Label, &a.Username, &a.Token, &a.Email, &a.Password, &a.TOTPSecret, &enabled, &a.CreatedAt); err != nil {
+			continue
+		}
+		a.Enabled = enabled != 0
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// UpsertBBPAccount inserts a new account or updates the existing one for
+// (platform,label). Returns the row id.
+func (s *SQLiteDB) UpsertBBPAccount(a BBPAccount) (int64, error) {
+	en := 0
+	if a.Enabled {
+		en = 1
+	}
+	res, err := s.db.Exec(`
+		INSERT INTO bbp_accounts (platform, label, username, token, email, password, totp_secret, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (platform, label) DO UPDATE SET
+			username = excluded.username, token = excluded.token,
+			email = excluded.email, password = excluded.password,
+			totp_secret = excluded.totp_secret, enabled = excluded.enabled
+	`, a.Platform, a.Label, a.Username, a.Token, a.Email, a.Password, a.TOTPSecret, en)
+	if err != nil {
+		return 0, err
+	}
+	// LastInsertId is only meaningful on insert; on update, look the row up.
+	if id, e := res.LastInsertId(); e == nil && id > 0 {
+		return id, nil
+	}
+	var id int64
+	_ = s.db.QueryRow(`SELECT id FROM bbp_accounts WHERE platform = ? AND label = ?`, a.Platform, a.Label).Scan(&id)
+	return id, nil
+}
+
+// SetBBPAccountEnabled toggles an account's enabled flag.
+func (s *SQLiteDB) SetBBPAccountEnabled(id int64, enabled bool) error {
+	en := 0
+	if enabled {
+		en = 1
+	}
+	_, err := s.db.Exec(`UPDATE bbp_accounts SET enabled = ? WHERE id = ?`, en, id)
+	return err
+}
+
+// UpdateBBPAccountToken persists a refreshed token (e.g. a freshly re-authed YWH JWT).
+func (s *SQLiteDB) UpdateBBPAccountToken(id int64, token string) error {
+	_, err := s.db.Exec(`UPDATE bbp_accounts SET token = ? WHERE id = ?`, token, id)
+	return err
+}
+
+// DeleteBBPAccount removes an account by id.
+func (s *SQLiteDB) DeleteBBPAccount(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM bbp_accounts WHERE id = ?`, id)
+	return err
+}
+
+// ── Bug-bounty program catalog ───────────────────────────────────────────────
+
+func (s *SQLiteDB) UpsertCatalogProgram(c CatalogProgram) (int64, error) {
+	ob := 0
+	if c.OffersBounty {
+		ob = 1
+	}
+	res, err := s.db.Exec(`
+		INSERT INTO bbp_catalog_programs (source, company, handle, url, rewards, safe_harbor, offers_bounty, updated_at)
+		VALUES (?,?,?,?,?,?,?,datetime('now'))
+		ON CONFLICT (source, handle) DO UPDATE SET
+			company=excluded.company, url=excluded.url, rewards=excluded.rewards,
+			safe_harbor=excluded.safe_harbor, offers_bounty=excluded.offers_bounty, updated_at=datetime('now')
+	`, c.Source, c.Company, c.Handle, c.URL, c.Rewards, c.SafeHarbor, ob)
+	if err != nil {
+		return 0, err
+	}
+	if id, e := res.LastInsertId(); e == nil && id > 0 {
+		return id, nil
+	}
+	var id int64
+	_ = s.db.QueryRow(`SELECT id FROM bbp_catalog_programs WHERE source=? AND handle=?`, c.Source, c.Handle).Scan(&id)
+	return id, nil
+}
+
+func (s *SQLiteDB) ReplaceCatalogDomains(programID int64, domains []CatalogDomain) error {
+	if _, err := s.db.Exec(`DELETE FROM bbp_catalog_domains WHERE program_id = ?`, programID); err != nil {
+		return err
+	}
+	for _, d := range domains {
+		if d.Domain == "" {
+			continue
+		}
+		in := 0
+		if d.InScope {
+			in = 1
+		}
+		if _, err := s.db.Exec(`
+			INSERT INTO bbp_catalog_domains (program_id, domain, in_scope) VALUES (?,?,?)
+			ON CONFLICT (program_id, domain) DO UPDATE SET in_scope=excluded.in_scope
+		`, programID, d.Domain, in); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteDB) ClearCatalogSource(source string) error {
+	_, err := s.db.Exec(`DELETE FROM bbp_catalog_programs WHERE source = ?`, source)
+	return err
+}
+
+func (s *SQLiteDB) SearchCatalogByKeyword(q string, limit int) ([]CatalogProgram, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, company, handle, url, rewards, safe_harbor, offers_bounty, updated_at
+		FROM bbp_catalog_programs
+		WHERE lower(company) LIKE '%'||lower(?)||'%' OR lower(handle) LIKE '%'||lower(?)||'%'
+		ORDER BY offers_bounty DESC, company LIMIT ?
+	`, q, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CatalogProgram
+	for rows.Next() {
+		var c CatalogProgram
+		var ob int
+		if err := rows.Scan(&c.ID, &c.Source, &c.Company, &c.Handle, &c.URL, &c.Rewards, &c.SafeHarbor, &ob, &c.UpdatedAt); err != nil {
+			continue
+		}
+		c.OffersBounty = ob != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteDB) SearchCatalogByDomain(q string, limit int) ([]CatalogDomainMatch, error) {
+	rows, err := s.db.Query(`
+		SELECT p.id, p.source, p.company, p.handle, p.url, p.rewards, p.safe_harbor, p.offers_bounty, p.updated_at,
+		       d.domain, d.in_scope
+		FROM bbp_catalog_domains d JOIN bbp_catalog_programs p ON d.program_id = p.id
+		WHERE lower(d.domain) = lower(?) OR lower(d.domain) LIKE '%'||lower(?)||'%'
+		ORDER BY (lower(d.domain) = lower(?)) DESC, d.in_scope DESC, p.company LIMIT ?
+	`, q, q, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CatalogDomainMatch
+	for rows.Next() {
+		var m CatalogDomainMatch
+		var ob, in int
+		if err := rows.Scan(&m.ID, &m.Source, &m.Company, &m.Handle, &m.URL, &m.Rewards, &m.SafeHarbor, &ob, &m.UpdatedAt, &m.MatchedDomain, &in); err != nil {
+			continue
+		}
+		m.OffersBounty = ob != 0
+		m.InScope = in != 0
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteDB) CatalogCounts() (int, int, error) {
+	var progs, doms int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM bbp_catalog_programs`).Scan(&progs)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM bbp_catalog_domains`).Scan(&doms)
+	return progs, doms, nil
 }
 
 // GetAllSettings returns every setting as a key→value map.

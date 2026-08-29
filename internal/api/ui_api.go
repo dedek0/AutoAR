@@ -22,9 +22,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/gin-gonic/gin"
+	"github.com/h0tak88r/AutoAR/internal/apikeys"
 	"github.com/h0tak88r/AutoAR/internal/brain"
 	"github.com/h0tak88r/AutoAR/internal/db"
-	"github.com/h0tak88r/AutoAR/internal/envloader"
 	"github.com/h0tak88r/AutoAR/internal/r2storage"
 	"github.com/h0tak88r/AutoAR/internal/scanner/monitor"
 	"github.com/h0tak88r/AutoAR/internal/scanner/monitorsuggest"
@@ -54,11 +54,25 @@ func apiConfigHandler(c *gin.Context) {
 		}
 		return n
 	}
+	// Shodan keys — list (SHODAN_API_KEYS) plus legacy single SHODAN_API_KEY.
+	// Only the count is exposed via the config endpoint, never the keys themselves.
+	shodanKeyCount := len(utils.ParseKeyList(os.Getenv("SHODAN_API_KEYS") + "," + os.Getenv("SHODAN_API_KEY")))
+	// Per-provider key counts (DB-first via apikeys) so the UI can show "N keys".
+	subfinderKeyCounts := make(map[string]int, len(subfinderProviderKeys))
+	for _, k := range subfinderProviderKeys {
+		subfinderKeyCounts[k] = len(apikeys.All(k))
+	}
 	c.JSON(http.StatusOK, gin.H{
+		"subfinder_key_counts": subfinderKeyCounts,
 		"version":         version.Version,
 		"r2_enabled":      r2storage.IsEnabled(),
 		"r2_public_url":   os.Getenv("R2_PUBLIC_URL"),
 		"r2_bucket":       os.Getenv("R2_BUCKET_NAME"),
+		// R2 account ID is an identifier (appears in the endpoint URL), safe to echo so
+		// the field prefills; the two API keys are secrets — only their set-state is returned.
+		"r2_account_id":     os.Getenv("R2_ACCOUNT_ID"),
+		"r2_access_key_set": strings.TrimSpace(os.Getenv("R2_ACCESS_KEY_ID")) != "",
+		"r2_secret_key_set": strings.TrimSpace(os.Getenv("R2_SECRET_KEY")) != "",
 		"auth_enabled":    authOn,
 		"auth_provider":   "local",
 		"db_type":         utils.GetEnv("DB_TYPE", "postgresql"),
@@ -73,6 +87,23 @@ func apiConfigHandler(c *gin.Context) {
 		"opencode_key_set":   strings.TrimSpace(os.Getenv("OPENCODE_API_KEY")) != "",
 		"openrouter_key_set": strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "",
 		"gemini_key_set":     strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "",
+		// Bug-bounty platform credentials — tokens are never returned, only whether
+		// each is configured. This endpoint is public (read pre-login), so we don't
+		// echo the H1 username value either (it's an identity handle) — just whether
+		// it's set. HackAdvisor's include-native flag is a plain non-secret bool.
+		"h1_username_set":   strings.TrimSpace(os.Getenv("H1_USERNAME")) != "",
+		"h1_token_set":      strings.TrimSpace(os.Getenv("H1_TOKEN")) != "",
+		"bc_token_set":      strings.TrimSpace(os.Getenv("BUGCROWD_TOKEN")) != "",
+		// hasIntigritiToken accepts both INTIGRITI_TOKEN and the INTIGRITI_API_KEY
+		// alias — a raw INTIGRITI_TOKEN check would wrongly show "not set" when only
+		// the alias is configured (even though Intigriti fetching works fine).
+		"it_token_set":      hasIntigritiToken(),
+		"ywh_token_set":     strings.TrimSpace(os.Getenv("YWH_TOKEN")) != "",
+		"ha_token_set":      strings.TrimSpace(os.Getenv("HACKADVISOR_TOKEN")) != "",
+		"ha_include_native": strings.EqualFold(strings.TrimSpace(os.Getenv("HACKADVISOR_INCLUDE_NATIVE")), "true"),
+		"chaos_key_set":     strings.TrimSpace(os.Getenv("CHAOS_API_KEY")) != "",
+		"shodan_keys_set":   shodanKeyCount > 0,
+		"shodan_keys_count": shodanKeyCount,
 		// Models — fall back to defaults when env is unset so the UI always shows something.
 		"opencode_model":   utils.GetEnv("OPENCODE_MODEL", "deepseek-v4-flash-free"),
 		"openrouter_model": utils.GetEnv("OPENROUTER_MODEL", "z-ai/glm-4.5-air:free"),
@@ -99,6 +130,27 @@ type UpdateSettingsBody struct {
 	OpenRouterKey  string `json:"openrouter_key"`
 	OpenCodeKey    string `json:"opencode_key"`
 	GeminiKey      string `json:"gemini_key"`
+	// Bug-bounty platform credentials. Empty string = "no change" (can't clear a
+	// secret with a blank submit); H1Username is a *string so it can be set/cleared
+	// explicitly. HAIncludeNative is a *bool (present = update).
+	H1Username      *string `json:"h1_username,omitempty"`
+	H1Token         string  `json:"h1_token"`
+	BugcrowdToken   string  `json:"bc_token"`
+	IntigritiToken  string  `json:"it_token"`
+	YWHToken        string  `json:"ywh_token"`
+	HackAdvisorKey  string  `json:"ha_token"`
+	HAIncludeNative *bool   `json:"ha_include_native,omitempty"`
+	ChaosKey        string  `json:"chaos_key"`
+	// ShodanKeys is a *string so the dashboard can replace OR clear the whole list
+	// (empty string clears). Accepts comma/newline-separated keys.
+	ShodanKeys *string `json:"shodan_keys,omitempty"`
+	// SubfinderKeys REPLACES a provider's whole value (map env-var name -> value).
+	// Only allowlisted names; a blank value keeps the current one.
+	SubfinderKeys map[string]string `json:"subfinder_keys,omitempty"`
+	// SubfinderKeysAppend ADDS key(s) to a provider's existing list without
+	// replacing it (the "+" action). Value may itself be a comma/space list.
+	// Merged and deduplicated against what is already stored.
+	SubfinderKeysAppend map[string]string `json:"subfinder_keys_append,omitempty"`
 	// AI model overrides — empty string keeps the current value, "default" clears the override.
 	OpenRouterModel *string `json:"openrouter_model,omitempty"`
 	OpenCodeModel   *string `json:"opencode_model,omitempty"`
@@ -109,6 +161,14 @@ type UpdateSettingsBody struct {
 	TimeoutMisconfig *int `json:"timeout_misconfig,omitempty"`
 	TimeoutKatana    *int `json:"timeout_katana,omitempty"`
 	TimeoutXss       *int `json:"timeout_xss,omitempty"`
+	// Cloudflare R2 storage. The non-secret fields are *T (present = set/clear); the
+	// two API keys are plain strings where "" = keep the stored value (masked edit).
+	UseR2       *bool   `json:"use_r2,omitempty"`
+	R2AccountID *string `json:"r2_account_id,omitempty"`
+	R2Bucket    *string `json:"r2_bucket,omitempty"`
+	R2PublicURL *string `json:"r2_public_url,omitempty"`
+	R2AccessKey string  `json:"r2_access_key"`
+	R2SecretKey string  `json:"r2_secret_key"`
 }
 
 func apiUpdateSettingsHandler(c *gin.Context) {
@@ -119,33 +179,99 @@ func apiUpdateSettingsHandler(c *gin.Context) {
 	}
 
 	if body.MonitorWebhook != "" {
-		_ = envloader.UpdateEnv("MONITOR_WEBHOOK_URL", strings.TrimSpace(body.MonitorWebhook))
+		saveEnvSetting("MONITOR_WEBHOOK_URL", strings.TrimSpace(body.MonitorWebhook))
 	}
 	if body.OpenRouterKey != "" {
-		_ = envloader.UpdateEnv("OPENROUTER_API_KEY", strings.TrimSpace(body.OpenRouterKey))
+		saveEnvSetting("OPENROUTER_API_KEY", strings.TrimSpace(body.OpenRouterKey))
 	}
 	if body.OpenCodeKey != "" {
-		_ = envloader.UpdateEnv("OPENCODE_API_KEY", strings.TrimSpace(body.OpenCodeKey))
+		saveEnvSetting("OPENCODE_API_KEY", strings.TrimSpace(body.OpenCodeKey))
 	}
 	if body.GeminiKey != "" {
-		_ = envloader.UpdateEnv("GEMINI_API_KEY", strings.TrimSpace(body.GeminiKey))
+		saveEnvSetting("GEMINI_API_KEY", strings.TrimSpace(body.GeminiKey))
+	}
+
+	// Bug-bounty platform credentials. Each non-empty value is persisted to the DB
+	// (survives redeployments) AND applied live via os.Setenv/.env — see
+	// saveEnvSetting. When any of these change we kick a background Programs-cache
+	// rebuild so the new/updated source shows up without waiting for the next warm cycle.
+	platformCredsChanged := false
+	if body.H1Username != nil {
+		saveEnvSetting("H1_USERNAME", strings.TrimSpace(*body.H1Username))
+		platformCredsChanged = true
+	}
+	if body.H1Token != "" {
+		saveEnvSetting("H1_TOKEN", strings.TrimSpace(body.H1Token))
+		platformCredsChanged = true
+	}
+	if body.BugcrowdToken != "" {
+		saveEnvSetting("BUGCROWD_TOKEN", strings.TrimSpace(body.BugcrowdToken))
+		platformCredsChanged = true
+	}
+	if body.IntigritiToken != "" {
+		saveEnvSetting("INTIGRITI_TOKEN", strings.TrimSpace(body.IntigritiToken))
+		platformCredsChanged = true
+	}
+	if body.YWHToken != "" {
+		saveEnvSetting("YWH_TOKEN", strings.TrimSpace(body.YWHToken))
+		platformCredsChanged = true
+	}
+	if body.HackAdvisorKey != "" {
+		saveEnvSetting("HACKADVISOR_TOKEN", strings.TrimSpace(body.HackAdvisorKey))
+		platformCredsChanged = true
+	}
+	if body.ChaosKey != "" {
+		saveEnvSetting("CHAOS_API_KEY", strings.TrimSpace(body.ChaosKey))
+	}
+	// Shodan key list — pointer field, so an explicit empty value clears all keys.
+	// Normalized to a comma-separated list; persisted to DB via saveEnvSetting.
+	if body.ShodanKeys != nil {
+		keys := utils.ParseKeyList(*body.ShodanKeys)
+		saveEnvSetting("SHODAN_API_KEYS", strings.Join(keys, ","))
+	}
+	// Subfinder provider keys — only allowlisted names. Replace (whole value) and
+	// append (add to the existing list) are both supported; blank keeps current.
+	for k, v := range body.SubfinderKeys {
+		if !subfinderProviderKeySet[k] || strings.TrimSpace(v) == "" {
+			continue
+		}
+		saveEnvSetting(k, strings.Join(utils.ParseKeyList(v), ","))
+	}
+	for k, v := range body.SubfinderKeysAppend {
+		if !subfinderProviderKeySet[k] || strings.TrimSpace(v) == "" {
+			continue
+		}
+		// Merge the new key(s) into whatever is already stored, deduped.
+		merged := apikeys.Append(k, utils.ParseKeyList(v))
+		saveEnvSetting(k, strings.Join(merged, ","))
+	}
+	if body.HAIncludeNative != nil {
+		v := "false"
+		if *body.HAIncludeNative {
+			v = "true"
+		}
+		saveEnvSetting("HACKADVISOR_INCLUDE_NATIVE", v)
+		platformCredsChanged = true
+	}
+	if platformCredsChanged {
+		refreshProgramsCacheAsync()
 	}
 	// Model overrides — pointer = field was present in the request.
 	// Value "" or "default" clears the override (provider falls back to its built-in default).
 	if body.OpenRouterModel != nil {
 		v := strings.TrimSpace(*body.OpenRouterModel)
 		if v == "" || strings.EqualFold(v, "default") {
-			_ = envloader.UpdateEnv("OPENROUTER_MODEL", "")
+			saveEnvSetting("OPENROUTER_MODEL", "")
 		} else {
-			_ = envloader.UpdateEnv("OPENROUTER_MODEL", v)
+			saveEnvSetting("OPENROUTER_MODEL", v)
 		}
 	}
 	if body.OpenCodeModel != nil {
 		v := strings.TrimSpace(*body.OpenCodeModel)
 		if v == "" || strings.EqualFold(v, "default") {
-			_ = envloader.UpdateEnv("OPENCODE_MODEL", "")
+			saveEnvSetting("OPENCODE_MODEL", "")
 		} else {
-			_ = envloader.UpdateEnv("OPENCODE_MODEL", v)
+			saveEnvSetting("OPENCODE_MODEL", v)
 		}
 	}
 
@@ -167,6 +293,43 @@ func apiUpdateSettingsHandler(c *gin.Context) {
 	saveTimeout("misconfig", "AUTOAR_TIMEOUT_MISCONFIG", body.TimeoutMisconfig)
 	saveTimeout("katana", "AUTOAR_TIMEOUT_KATANA", body.TimeoutKatana)
 	saveTimeout("xss", "AUTOAR_TIMEOUT_XSS", body.TimeoutXss)
+
+	// Cloudflare R2 storage. Non-secret fields (pointers) are applied when present so
+	// they can be set or cleared; the two API keys are kept when submitted blank
+	// (masked edit). All persist to the DB via saveEnvSetting. If anything changed we
+	// Reload the R2 client so the new config takes effect without a restart.
+	r2Changed := false
+	if body.UseR2 != nil {
+		v := "false"
+		if *body.UseR2 {
+			v = "true"
+		}
+		saveEnvSetting("USE_R2_STORAGE", v)
+		r2Changed = true
+	}
+	if body.R2AccountID != nil {
+		saveEnvSetting("R2_ACCOUNT_ID", strings.TrimSpace(*body.R2AccountID))
+		r2Changed = true
+	}
+	if body.R2Bucket != nil {
+		saveEnvSetting("R2_BUCKET_NAME", strings.TrimSpace(*body.R2Bucket))
+		r2Changed = true
+	}
+	if body.R2PublicURL != nil {
+		saveEnvSetting("R2_PUBLIC_URL", strings.TrimSpace(*body.R2PublicURL))
+		r2Changed = true
+	}
+	if strings.TrimSpace(body.R2AccessKey) != "" {
+		saveEnvSetting("R2_ACCESS_KEY_ID", strings.TrimSpace(body.R2AccessKey))
+		r2Changed = true
+	}
+	if strings.TrimSpace(body.R2SecretKey) != "" {
+		saveEnvSetting("R2_SECRET_KEY", strings.TrimSpace(body.R2SecretKey))
+		r2Changed = true
+	}
+	if r2Changed {
+		r2storage.Reload()
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Settings updated successfully", "ok": true})
 }
@@ -361,6 +524,9 @@ func apiListSubdomains(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	for i := range subs {
+		subs[i].Host = subs[i].BestURL()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"domain":     domain,
@@ -405,6 +571,9 @@ func apiAllSubdomainsPaginated(c *gin.Context) {
 	}
 	if subs == nil {
 		subs = make([]db.GlobalSubdomain, 0)
+	}
+	for i := range subs {
+		subs[i].Host = subs[i].BestURL()
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -530,7 +699,9 @@ func apiRetryCnames(c *gin.Context) {
 					cnamesStr := strings.Join(results.CNAME, ",")
 
 					// Update DB if we actually found something
-					_ = db.UpdateSubdomainCNAME(sub.Domain, sub.Subdomain, cnamesStr)
+					if err := db.UpdateSubdomainCNAME(sub.Domain, sub.Subdomain, cnamesStr); err != nil {
+						log.Printf("[ERROR] failed to persist CNAME for %s (column will be stale): %v", sub.Subdomain, err)
+					}
 
 					// Check match string
 					if matchStr != "" && strings.Contains(strings.ToLower(cnamesStr), matchStr) {
@@ -602,13 +773,20 @@ func apiRunGlobalNuclei(c *gin.Context) {
 		limit := 10000
 		totalSubs := 0
 		for offset := 0; ; offset += limit {
-			subs, _, err := db.ListAllSubdomainsPaginated("", "", "", 0, false, limit, offset)
+			// liveOnly=true: only pull hosts already probed live via httpx. Each is
+			// written as its stored scheme-prefixed URL (https://host), so nuclei runs
+			// the template directly against it and never re-probes (no httpx step).
+			subs, _, err := db.ListAllSubdomainsPaginated("", "", "", 0, true, limit, offset)
 			if err != nil || len(subs) == 0 {
 				break
 			}
 			for _, s := range subs {
-				if s.Subdomain != "" {
-					tmpFile.WriteString(s.Subdomain + "\n")
+				target := s.BestURL()
+				if target == "" {
+					target = s.Subdomain
+				}
+				if target != "" {
+					tmpFile.WriteString(target + "\n")
 					totalSubs++
 				}
 			}
@@ -616,10 +794,10 @@ func apiRunGlobalNuclei(c *gin.Context) {
 		tmpFile.Close()
 
 		if totalSubs == 0 {
-			return fmt.Errorf("no subdomains found for global nuclei scan")
+			return fmt.Errorf("no live hosts found in the database — run a scan/httpx first so there are live URLs to test")
 		}
 
-		stdLog(scanID, "[INFO] Loaded %d targets for scan", totalSubs)
+		stdLog(scanID, "[INFO] Loaded %d live host(s) from the database (httpx skipped)", totalSubs)
 
 		var templatePath string
 		var cleanupTemplate func()
@@ -665,6 +843,9 @@ func apiRunGlobalNuclei(c *gin.Context) {
 		if err != nil {
 			return fmt.Errorf("nuclei SDK scan failed: %w", err)
 		}
+
+		// Record the finding count so the Scans page shows the "N findings" tag.
+		_ = db.UpdateScanStats(scanID, matches, 0)
 
 		stdLog(scanID, "[OK] Global Nuclei scan completed. Matches: %d", matches)
 		utils.SendWebhookLogAsync(fmt.Sprintf(" **Global Nuclei Scan Completed**\nTemplate: `%s`\nTargets: %d\nMatches: %d", templateNameForLog, totalSubs, matches))
@@ -1663,7 +1844,7 @@ func apiPostMonitorSubdomainTarget(c *gin.Context) {
 
 	interval := body.IntervalSeconds
 	if interval <= 0 {
-		interval = 3600
+		interval = 86400
 	}
 	threads := body.Threads
 	if threads <= 0 {

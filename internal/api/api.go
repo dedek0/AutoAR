@@ -409,9 +409,10 @@ type ScanRequest struct {
 	DOSTest              *bool     `json:"dos_test"`               // Zerodays DoS test
 	EnableSourceExposure *bool     `json:"enable_source_exposure"` // Zerodays source exposure
 	Silent               *bool     `json:"silent"`                 // Zerodays silent mode
-	CVEs                 *[]string `json:"cves"`                   // CVEs to check (CVE-2025-55182, CVE-2025-14847)
+	CVEs                 *[]string `json:"cves"`                   // CVEs to check (CVE-2025-55182, CVE-2025-14847, CVE-2026-63030)
 	MongoDBHost          *string   `json:"mongodb_host"`           // MongoDB host for CVE-2025-14847
 	MongoDBPort          *int      `json:"mongodb_port"`           // MongoDB port for CVE-2025-14847
+	WP2ShellConfirmSQLi  *bool     `json:"wp2shell_confirm_sqli"`  // wp2shell: also run the time-based SQLi confirmation
 	// Misconfig options
 	ServiceID    *string `json:"service_id"`   // Misconfig service ID
 	Delay        *int    `json:"delay"`        // Misconfig delay (ms)
@@ -551,6 +552,7 @@ func SetupAPI() *gin.Engine {
 		apiGroup.GET("/subdomains/cnames/progress", apiRetryCnamesProgress)
 		apiGroup.POST("/subdomains/nuclei/run", apiRunGlobalNuclei)
 		apiGroup.POST("/subdomains/import", apiImportSubdomains)
+		apiGroup.POST("/pipeline/root-scan", apiRunRootPipeline)
 		apiGroup.GET("/scans", apiListScans)
 		apiGroup.GET("/scans/:id/results/summary", apiScanResultsSummary)
 		apiGroup.GET("/scans/:id/results/files", apiScanResultFiles)
@@ -583,17 +585,28 @@ func SetupAPI() *gin.Engine {
 		apiGroup.POST("/monitor/url-targets", apiPostMonitorURLTarget)
 		apiGroup.POST("/monitor/suggest-from-domain", apiPostMonitorSuggestFromDomain)
 		apiGroup.DELETE("/monitor/url-targets/:id", apiDeleteMonitorURLTarget)
-		apiGroup.POST("/monitor/url-targets/:id/pause", apiPostMonitorURLTarget)
-		apiGroup.POST("/monitor/url-targets/:id/resume", apiPostMonitorURLTarget)
+		apiGroup.POST("/monitor/url-targets/:id/pause", apiPauseMonitorURLTarget)
+		apiGroup.POST("/monitor/url-targets/:id/resume", apiResumeMonitorURLTarget)
 		apiGroup.POST("/monitor/subdomain-targets", apiPostMonitorSubdomainTarget)
 		apiGroup.DELETE("/monitor/subdomain-targets/:id", apiDeleteMonitorSubdomainTarget)
-		apiGroup.POST("/monitor/subdomain-targets/:id/pause", apiPostMonitorSubdomainTarget)
-		apiGroup.POST("/monitor/subdomain-targets/:id/resume", apiPostMonitorSubdomainTarget)
+		apiGroup.POST("/monitor/subdomain-targets/:id/pause", apiPauseMonitorSubdomainTarget)
+		apiGroup.POST("/monitor/subdomain-targets/:id/resume", apiResumeMonitorSubdomainTarget)
 		apiGroup.GET("/r2/files", apiR2Files)
 		apiGroup.POST("/r2/delete", apiR2Delete)
 		// Bug bounty scope / target fetch endpoints
 		apiGroup.POST("/scope/fetch", apiFetchScope)
+		apiGroup.POST("/chaos/subdomains", apiChaosSubdomains) // Chaos dataset subdomain lookup
 		apiGroup.GET("/scope/platforms", apiScopePlatforms)
+		// Multi-account management (multiple accounts per platform)
+		apiGroup.GET("/accounts", apiListBBPAccounts)
+		apiGroup.POST("/accounts", apiUpsertBBPAccount)
+		apiGroup.POST("/accounts/:id/toggle", apiToggleBBPAccount)
+		apiGroup.GET("/accounts/:id/check", apiCheckBBPAccount)
+		apiGroup.DELETE("/accounts/:id", apiDeleteBBPAccount)
+		// Program Lookup (keyword/domain → bug-bounty program) catalog
+		apiGroup.GET("/assets/program-lookup", apiProgramLookup)
+		apiGroup.POST("/assets/program-sync", apiProgramSync)
+		apiGroup.GET("/assets/catalog-status", apiCatalogStatus)
 		apiGroup.GET("/scope/programs", apiListPrograms)
 		apiGroup.POST("/scope/program-summaries", apiProgramScopeSummaries)
 		apiGroup.GET("/scope/watch-status", apiProgramWatchStatus)
@@ -1568,7 +1581,7 @@ func indexScanArtifacts(scanID, scanType, target string) {
 		"urls": true, "js": true, "jsscan": true, "reflection": true,
 		"nuclei": true, "tech": true, "ports": true, "gf": true,
 		"backup": true, "aem": true, "depconfusion": true, "wp_confusion": true,
-		"zerodays": true,
+		"zerodays": true, "pipeline": true,
 	}
 
 	if domainRootTypes[scanType] && target != "" {

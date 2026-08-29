@@ -219,6 +219,24 @@ func DeleteMonitorChangesByType(changeType string) (int64, error) {
 	return database.DeleteMonitorChangesByType(changeType)
 }
 
+// UpsertProgramScope persists last-known-good scope for one program.
+func UpsertProgramScope(s PersistedProgramScope) error {
+	database, err := getInitializedDB()
+	if err != nil {
+		return err
+	}
+	return database.UpsertProgramScope(s)
+}
+
+// LoadProgramScopes returns every persisted scope row keyed by platform:handle.
+func LoadProgramScopes() (map[string]PersistedProgramScope, error) {
+	database, err := getInitializedDB()
+	if err != nil {
+		return nil, err
+	}
+	return database.LoadProgramScopes()
+}
+
 // InsertKeyhackTemplate inserts or updates a KeyHack template
 func InsertKeyhackTemplate(keyname, commandTemplate, method, url, header, body, notes, description string) error {
 	database, err := getInitializedDB()
@@ -307,6 +325,28 @@ func ListSubdomainsWithStatus(domain string) ([]SubdomainStatus, error) {
 		return nil, err
 	}
 	return database.ListSubdomainsWithStatus(domain)
+}
+
+// ListLiveSubdomainURLs returns the stored, scheme-prefixed URL for every live
+// subdomain of a domain (e.g. https://api.example.com). Using these as nuclei
+// targets lets a scan skip the httpx probing step, since the scheme was already
+// resolved when the subdomain was probed. Returns nothing if the domain has no
+// live subdomains stored yet (caller should then run httpx).
+func ListLiveSubdomainURLs(domain string) ([]string, error) {
+	subs, err := ListSubdomainsWithStatus(domain)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(subs))
+	for _, s := range subs {
+		if !s.IsLive {
+			continue
+		}
+		if u := s.BestURL(); u != "" {
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }
 
 // ListAllSubdomainsPaginated returns a paginated global list of subdomains matching a search.

@@ -567,7 +567,15 @@ const ANDROID_RULES = [
     },
     {
         id: 'trust_all', name: 'Trust All SSL Certificates', severity: 'issue',
-        patterns: [/checkServerTrusted/g, /X509TrustManager/g, /TrustAllCerts/g],
+        // Bare 'checkServerTrusted'/'X509TrustManager' identifiers fire on EVERY
+        // legitimate implementation too -- e.g. OkHttp's own internal
+        // AndroidCertificateChainCleaner always contains both, calls the real
+        // platform X509TrustManagerExtensions, and re-throws on failure. Verified
+        // against a real banking app: 100% false positive on bare identifiers.
+        // 'TrustAllCerts' (the textbook copy-paste-vulnerable class name) and a
+        // literal EMPTY checkServerTrusted body are the actual "accepts everything"
+        // signatures -- require one of those instead.
+        patterns: [/TrustAllCerts/g, /checkServerTrusted\s*\([^)]*\)(?:\s*throws\s+[\w.]+)?\s*\{\s*\}/g],
         description: 'Accepting all certificates makes the app vulnerable to man-in-the-middle attacks.', cwe: 'CWE-295', owasp: 'M3', masvs: 'NETWORK-4'
     },
     {
@@ -831,6 +839,11 @@ const ANDROID_RULES = [
         description: 'URI data from deep link intent read without validation. Can enable open redirect, SSRF, or account takeover if used in navigation or API calls.', cwe: 'CWE-601', owasp: 'M1', masvs: 'PLATFORM-3'
     },
     {
+        id: 'nav_deeplink_ids', name: 'Jetpack Navigation Deep-Link Intent-Extra Handling', severity: 'issue',
+        patterns: [/android-support-nav:controller:deepLink(?:Ids|Args|Extras)/g, /NavController[\s\S]{0,60}?\.handleDeepLink\s*\(/g, /findNavController\s*\([^)]*\)[\s\S]{0,60}?\.handleDeepLink\s*\(/g],
+        description: 'App uses Jetpack Navigation’s Intent-extra deep-link mechanism (NavController.handleDeepLink). The deepLinkIds/deepLinkArgs/deepLinkExtras extras are trusted from whatever Intent reaches the NavHost’s activity — they are not scoped to the app’s own intent-filter data URIs. If an exported activity hosts this NavController without stripping these extras first, any co-installed app can force navigation to arbitrary destinations by their numeric resource ID, bypassing intended start-destination gating (e.g. login/profile screens). See "Jetpack Navigation Deep-Link Injection" below if this app also declares an exported activity without a permission.', cwe: 'CWE-284', owasp: 'M1', masvs: 'PLATFORM-3'
+    },
+    {
         id: 'dynamic_receiver', name: 'Dynamic Broadcast Receiver (Potentially Exported)', severity: 'issue',
         patterns: [/registerReceiver\s*\([^)]*(?:new\s+IntentFilter|filter)/g],
         description: 'Dynamically registered BroadcastReceiver. On Android 14+, receivers must specify RECEIVER_NOT_EXPORTED or RECEIVER_EXPORTED flag. Missing flag defaults to exported.', cwe: 'CWE-926', owasp: 'M1', masvs: 'PLATFORM-4'
@@ -1082,13 +1095,16 @@ const ANDROID_RULES = [
      patterns:[new RegExp("aws[_-]?access[_-]?key[_-]?id(=| =|:| :)", 'gi')],
      description:'Detected sensitive pattern: aws_access_key_id - 1. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_access_key_id_value',name:"AWS Access Key ID Value",severity:'issue',
-     patterns:[new RegExp("(A3T[A-Z0-9]|AKIA|AGPA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", 'gi')],
+     // Case-SENSITIVE ('g' only): real AWS key IDs are always fully uppercase. The
+     // previous 'gi' flag matched mixed-case runs (e.g. "ASIAAAAAUMOUw0OhIZQg") that
+     // AWS never issues -- almost always a coincidental hit on binary-derived text.
+     patterns:[new RegExp("(A3T[A-Z0-9]|AKIA|AGPA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", 'g')],
      description:'Detected sensitive pattern: AWS Access Key ID Value. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_api_gateway',name:"AWS API Gateway",severity:'issue',
      patterns:[new RegExp("[0-9a-z]+.execute-api.[0-9a-z._-]+.amazonaws.com", 'gi')],
      description:'Detected sensitive pattern: AWS API Gateway. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_api_key',name:"AWS API Key",severity:'issue',
-     patterns:[new RegExp("AKIA[0-9A-Z]{16}", 'gi')],
+     patterns:[new RegExp("AKIA[0-9A-Z]{16}", 'g')],
      description:'Detected sensitive pattern: AWS API Key. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_appsync_graphql_key',name:"AWS AppSync GraphQL Key",severity:'issue',
      patterns:[new RegExp("da2-[a-z0-9]{26}", 'gi')],
@@ -1097,7 +1113,8 @@ const ANDROID_RULES = [
      patterns:[new RegExp("arn:aws:[a-z0-9\\-]+:[a-z]{2}-[a-z]+-[0-9]+:[0-9]+:.+", 'gi')],
      description:'Detected sensitive pattern: AWS ARN. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_client_id',name:"AWS client ID",severity:'issue',
-     patterns:[new RegExp("(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", 'gi')],
+     // Case-sensitive -- see apx_aws_access_key_id_value above.
+     patterns:[new RegExp("(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", 'g')],
      description:'Detected sensitive pattern: AWS client ID. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_aws_config_accesskeyid',name:"aws_config_accesskeyid",severity:'issue',
      patterns:[new RegExp("aws[_-]?config[_-]?accesskeyid(=| =|:| :)", 'gi')],
@@ -1541,7 +1558,9 @@ const ANDROID_RULES = [
      patterns:[new RegExp("key-[0-9a-zA-Z]{32}", 'gi')],
      description:'Detected sensitive pattern: Mailgun API Key - 1. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_mailgun_api_key_2',name:"Mailgun API key - 2",severity:'issue',
-     patterns:[new RegExp("(mailgun|mg)[0-9a-z]{32}", 'gi')],
+     // 'mg' alone (without the full 'mailgun' word) as a 2-char prefix matched almost
+     // any 34-char alphanumeric run in binary-derived string data -- dropped it.
+     patterns:[new RegExp("mailgun[0-9a-z]{32}", 'gi')],
      description:'Detected sensitive pattern: Mailgun API key - 2. Ensure no secrets are hardcoded.',cwe:'CWE-798',owasp:'M9',masvs:'STORAGE-14'},
     {id:'apx_mailgun_apikey',name:"mailgun_apikey",severity:'issue',
      patterns:[new RegExp("mailgun[_-]?apikey(=| =|:| :)", 'gi')],
@@ -1819,6 +1838,23 @@ function extractManifestInfo(R) {
     }
 }
 
+// Sanity backstop for the bulk-imported 'apx_*' secret-pattern rules (~180 loose
+// keyword/format regexes). Large real APKs contain a lot of binary-derived text
+// (compressed assets, native blobs) that coincidentally satisfies a short
+// fixed-prefix + alnum-run pattern. Real secrets are high-entropy; coincidental
+// matches on binary noise tend to have repeated characters or low character
+// diversity. This doesn't validate a secret is real -- it only filters out the
+// most obviously-not-random matches, which measurably cut false positives on a
+// real banking-app APK (e.g. "ASIAAAAAUMOUw0OhIZQg") without touching well-formed
+// keys we could verify independently (e.g. a real "AIzaSy..." Google API key).
+function looksLikeRealSecret(s) {
+    if (!s || s.length < 10) return true; // too short to judge meaningfully either way
+    if (/(.)\1{3,}/.test(s)) return false; // 4+ identical chars in a row
+    const uniq = new Set(s.toLowerCase()).size;
+    if (s.length >= 12 && uniq / s.length < 0.35) return false; // too repetitive for random data
+    return true;
+}
+
 function analyzeContent(content, filePath, rules) {
     const findings = [];
     const safe = content.length > 300000 ? content.slice(0, 300000) : content;
@@ -1828,6 +1864,10 @@ function analyzeContent(content, filePath, rules) {
                 pat.lastIndex = 0;
                 let m, count = 0;
                 while ((m = pat.exec(safe)) !== null && count++ < 20) {
+                    if (rule.id.startsWith('apx_') && !looksLikeRealSecret(m[0])) {
+                        if (m.index === pat.lastIndex) pat.lastIndex++;
+                        continue;
+                    }
                     const ln = (safe.substring(0, m.index).match(/\n/g) || []).length + 1;
                     findings.push({
                         ruleId: rule.id, ruleName: rule.name, severity: rule.severity,
@@ -1886,6 +1926,22 @@ const TRACKER_SIGS = [
 function detectTrackers(strings, files) {
     const combined = strings.slice(0, 30000).join('\n') + '\n' + files.join('\n');
     return [...new Set(TRACKER_SIGS.filter(([, sigs]) => sigs.some(s => combined.includes(s))).map(([name]) => name))];
+}
+
+// The Jetpack Navigation library's own deep-link Intent-extra key constants.
+// Present verbatim in the dex string pool whenever an app uses
+// NavController.handleDeepLink() with implicit/explicit deep links — R8/ProGuard
+// minification renames identifiers but does not alter string literal content, so
+// this survives in release builds. Checked against the FULL string pool (not the
+// per-class decompiled-source scan, which is capped at 1000 classes/dex for
+// performance and can miss this since it lives in a third-party library class).
+const NAV_DEEPLINK_MARKERS = [
+    'android-support-nav:controller:deepLinkIds',
+    'android-support-nav:controller:deepLinkArgs',
+    'android-support-nav:controller:deepLinkExtras',
+];
+function detectNavDeepLinkHandling(strings) {
+    return strings.some(s => NAV_DEEPLINK_MARKERS.some(m => s.includes(m)));
 }
 
 function buildSmaliTree(classes, tree, dexIdx) {
@@ -2892,6 +2948,55 @@ function generateSmaliView(cls, buf, allStrings, allTypes, allMethods, allFields
     return L.join('\n');
 }
 
+// unwrapApkContainer detects a split-APK container (.apks from `bundletool
+// build-apks`, or .xapk from APKPure) and extracts the base APK's bytes so the
+// rest of the pipeline can analyze it exactly like a plain .apk. Both formats
+// are themselves zip files wrapping a real base .apk one level deeper — without
+// this, AndroidManifest.xml lookup at the container root silently finds nothing
+// and the whole analysis comes back empty.
+//   .apks (bundletool): universal.apk (single-APK mode) OR splits/base-master.apk
+//                        / splits/base.apk (default split mode) at the root.
+//   .xapk (APKPure):     a root-level manifest.json plus one or more root-level
+//                        *.apk files; the base APK is the one NOT prefixed
+//                        "config." (those are density/ABI/language splits).
+// If nothing recognizable is found, returns the original buffer unchanged so
+// existing behavior (attempt analysis, warn if no manifest) is preserved.
+async function unwrapApkContainer(arrayBuffer, fileName) {
+    const notAContainer = { buffer: arrayBuffer, containerFormat: null, entryName: null };
+    try {
+        const outer = await JSZip.loadAsync(arrayBuffer);
+        if (outer.file('AndroidManifest.xml')) return notAContainer; // already a plain APK
+
+        const paths = Object.keys(outer.files).filter(p => !outer.files[p].dir);
+        const rootApks = paths.filter(p => /^[^/]+\.apk$/i.test(p));
+
+        // bundletool .apks
+        let entry = paths.find(p => p === 'universal.apk')
+            || paths.find(p => p === 'splits/base-master.apk')
+            || paths.find(p => p === 'splits/base.apk')
+            || paths.find(p => /^splits\/base[-.]master\.apk$/i.test(p));
+        let format = entry ? 'bundletool .apks' : null;
+
+        // APKPure .xapk: prefer a root .apk not named like a config/density/abi/lang split
+        if (!entry && rootApks.length) {
+            entry = rootApks.find(p => !/^config\./i.test(p)) || rootApks[0];
+            format = 'APKPure .xapk';
+        }
+
+        if (!entry) return notAContainer;
+
+        const innerBuf = await outer.file(entry).async('arraybuffer');
+        // Sanity check: the extracted entry must itself contain a manifest, or this
+        // guess was wrong -- fall back rather than silently analyzing garbage.
+        const innerZip = await JSZip.loadAsync(innerBuf);
+        if (!innerZip.file('AndroidManifest.xml')) return notAContainer;
+
+        return { buffer: innerBuf, containerFormat: format, entryName: entry };
+    } catch (e) {
+        return notAContainer; // corrupt/unrecognized container -- fall through, don't crash
+    }
+}
+
 async function analyzeAPK(arrayBuffer, fileMeta, opts) {
     opts = opts || {};
     const onProgress = opts.onProgress || (() => {});
@@ -2910,11 +3015,21 @@ async function analyzeAPK(arrayBuffer, fileMeta, opts) {
     };
 
     onProgress(5, 'Reading APK');
+    if (typeof JSZip === 'undefined') throw new Error('JSZip not loaded');
+
+    onProgress(10, 'Detecting file format');
+    const unwrapped = await unwrapApkContainer(arrayBuffer, fileMeta.name);
+    if (unwrapped.containerFormat) {
+        R.appInfo.containerFormat = unwrapped.containerFormat;
+        R.appInfo.containerEntry = unwrapped.entryName;
+        R.warnings.push(`Detected ${unwrapped.containerFormat} container — analyzing the base APK inside it: ${unwrapped.entryName}`);
+    }
+    arrayBuffer = unwrapped.buffer; // from here on, arrayBuffer/zip refer to the real base APK
+
     R.appInfo.sha256 = await sha256hex(arrayBuffer);
     R.appInfo.md5 = await md5hex(arrayBuffer);
 
     onProgress(14, 'Extracting');
-    if (typeof JSZip === 'undefined') throw new Error('JSZip not loaded');
     const zip = await JSZip.loadAsync(arrayBuffer);
 
     onProgress(18, 'Indexing files');
@@ -3014,6 +3129,18 @@ async function analyzeAPK(arrayBuffer, fileMeta, opts) {
         } catch (e) { R.warnings.push(dp + ' parse error: ' + e.message); }
     }
 
+    // Authoritative, uncapped check for Jetpack Navigation deep-link handling —
+    // see detectNavDeepLinkHandling for why this can't rely on the per-class
+    // decompiled-source scan below.
+    if (detectNavDeepLinkHandling(allDexStrings)) {
+        R.findings.push({
+            ruleId: 'nav_deeplink_ids', ruleName: 'Jetpack Navigation Deep-Link Intent-Extra Handling', severity: 'issue',
+            description: 'App bundles Jetpack Navigation’s Intent-extra deep-link mechanism (NavController.handleDeepLink) — its dex string pool contains the library’s android-support-nav:controller:deepLinkIds/deepLinkArgs/deepLinkExtras key constants. These extras are trusted from whatever Intent reaches the NavHost’s activity. If an exported activity hosts this NavController without stripping these extras first, any co-installed app can force navigation to arbitrary destinations by their numeric resource ID, bypassing intended start-destination gating (e.g. login/profile screens). See "Jetpack Navigation Deep-Link Injection" below if this app also declares an exported activity without a permission.',
+            cwe: 'CWE-284', owasp: 'M1', masvs: 'PLATFORM-3',
+            file: 'classes.dex (string pool)', line: null, match: 'android-support-nav:controller:deepLinkIds',
+        });
+    }
+
     onProgress(54, 'Parsing resources');
     const arscFile = zip.file('resources.arsc');
     if (arscFile) {
@@ -3102,6 +3229,48 @@ async function analyzeAPK(arrayBuffer, fileMeta, opts) {
         } catch (e) { R.warnings.push('Failed to scan ' + path + ': ' + (e.message || e)); }
     }
 
+    // Correlate Jetpack Navigation deep-link handling with an exported, unprotected
+    // activity: this is the exact "forced navigation via deep-link Intent extras"
+    // primitive (CWE-284) — a malicious co-installed app can pass
+    // android-support-nav:controller:deepLinkIds/deepLinkArgs/deepLinkExtras to
+    // force navigation to arbitrary destinations, bypassing session/login gating.
+    //
+    // A real, in-scope banking app (io.wio.sme) false-positived on this: the marker
+    // string was present only because a transitively-bundled library depends on
+    // androidx.navigation, but the app itself (a FlutterActivity with
+    // flutter_deeplinking_enabled=false) had no res/navigation/ graph at all --
+    // there was nothing for handleDeepLink() to actually navigate to. Require an
+    // actual navigation-graph resource in the APK before escalating.
+    const hasNavGraphResource = (R.files || []).some(f => /^res\/navigation(-[^/]+)?\//i.test(f));
+    if (R.findings.some(f => f.ruleId === 'nav_deeplink_ids') && hasNavGraphResource) {
+        const exposedActivities = (R.components && R.components.activities || []).filter(a => a.exported && !a.permission);
+        if (exposedActivities.length > 0) {
+            const names = exposedActivities.map(a => a.name).slice(0, 5).join(', ') + (exposedActivities.length > 5 ? `, +${exposedActivities.length - 5} more` : '');
+            R.findings.push({
+                ruleId: 'nav_deeplink_forced_navigation',
+                ruleName: 'Jetpack Navigation Deep-Link Injection (Forced Navigation) — Verify Manually',
+                severity: 'issue',
+                description: `This app both uses Jetpack Navigation's deep-link Intent-extra mechanism (NavController.handleDeepLink) AND declares exported activities without a permission: ${names}. If any of these hosts the NavHostFragment, a malicious co-installed app can send an Intent with the "android-support-nav:controller:deepLinkIds" extra set to a destination's numeric resource ID and force navigation there directly — bypassing the graph's start destination (commonly a login/profile gate) and potentially rendering authenticated-only screens while logged out. Verify: decompile with apktool, confirm the activity's layout declares a NavHostFragment/FragmentContainerView, enumerate destination IDs in res/navigation/*.xml, then test with 'adb shell am start -n <pkg>/<activity> --eia "android-support-nav:controller:deepLinkIds" <id>' after a cold start (force-stop first — onNewIntent() often re-guards the warm-start path). Fix: strip android-support-nav:controller:* extras from the launch Intent before the NavController initializes, or re-check session state on entry to sensitive destinations instead of relying on the start destination alone.`,
+                cwe: 'CWE-284', owasp: 'M1', masvs: 'PLATFORM-1',
+                file: 'AndroidManifest.xml + classes.dex', line: null,
+                match: `${exposedActivities.length} exported activit${exposedActivities.length === 1 ? 'y' : 'ies'} + Jetpack Navigation deep-link handling`,
+            });
+        }
+    }
+
+    // provider_query_exposed fires on any ContentResolver.query() call in decompiled
+    // code with zero awareness of whether any provider is actually exported --
+    // Android forbids other apps from querying a non-exported provider at all, so
+    // without a genuinely exported+unprotected provider this can never be
+    // exploited by another app. Drop it entirely when none exists (the common case:
+    // apps routinely query their own local/non-exported providers as normal code).
+    if (R.findings.some(f => f.ruleId === 'provider_query_exposed')) {
+        const exposedProviders = (R.components && R.components.providers || []).filter(p => p.exported && !p.permission && !p.readPermission);
+        if (exposedProviders.length === 0) {
+            R.findings = R.findings.filter(f => f.ruleId !== 'provider_query_exposed');
+        }
+    }
+
     onProgress(90, 'Detecting trackers');
     R.trackers = detectTrackers(allDexStrings, R.files);
 
@@ -3182,7 +3351,7 @@ const api = {
     generateJavaView, generateSmaliView, disassembleCode,
     dexTypeToJava, smaliFlags,
     sha256hex, md5hex, formatSize, esc,
-    analyzeAPK,
+    analyzeAPK, unwrapApkContainer,
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
